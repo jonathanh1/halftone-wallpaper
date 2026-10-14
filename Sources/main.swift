@@ -15,6 +15,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var views: [CGDirectDisplayID: WKWebView] = [:]
     private let interactive = ProcessInfo.processInfo.arguments.contains("--interactive")
     private let pointerFeed = !ProcessInfo.processInfo.arguments.contains("--no-pointer")
+    // --still: freeze the field on one frame — ~0% CPU, e.g. for battery life.
+    private let still = ProcessInfo.processInfo.arguments.contains("--still")
     private var feedTarget: CGDirectDisplayID? = nil
     private var feedTimer: Timer?
     private var statusItem: NSStatusItem?
@@ -85,7 +87,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         webView.autoresizingMask = [.width, .height]
         w.contentView = webView
         let url = Bundle.main.url(forResource: "ripple", withExtension: "html")!
-        webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+        // --still freezes the field on one frame; loadFileURL keeps the query in location.search.
+        let pageURL = still ? url.appending(queryItems: [URLQueryItem(name: "motion", value: "off")]) : url
+        webView.loadFileURL(pageURL, allowingReadAccessTo: url.deletingLastPathComponent())
 
         w.orderFrontRegardless()
         views[screenID(screen)] = webView
