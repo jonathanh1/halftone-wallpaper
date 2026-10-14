@@ -28,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         reconcileWindows()
         installStatusItem()
         installPowerWatch()
+        installScreenSleepWatch()
 
         NotificationCenter.default.addObserver(
             self, selector: #selector(screenParamsChanged),
@@ -74,6 +75,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let js = "window.__setMotion && __setMotion('\(onBattery ? "off" : "full")');"
         for web in views.values { web.evaluateJavaScript(js, completionHandler: nil) }
+    }
+
+    // MARK: display sleep
+    // Freeze the field while the displays are asleep — nobody sees it, so 60fps is pure waste.
+    // Resume on wake through the same __setMotion path as the battery watcher.
+    private var displaysAsleep = false
+
+    private func installScreenSleepWatch() {
+        let center = NSWorkspace.shared.notificationCenter
+        center.addObserver(self, selector: #selector(screensDidSleep),
+                           name: NSWorkspace.screensDidSleepNotification, object: nil)
+        center.addObserver(self, selector: #selector(screensDidWake),
+                           name: NSWorkspace.didWakeNotification, object: nil)
+    }
+
+    @objc private func screensDidSleep() {
+        displaysAsleep = true
+        for web in views.values { web.evaluateJavaScript("window.__setMotion && __setMotion('off');", completionHandler: nil) }
+    }
+
+    @objc private func screensDidWake() {
+        displaysAsleep = false
+        applyPowerState() // restores 'full' on AC, keeps 'off' on battery
     }
 
     private func screenID(_ s: NSScreen) -> CGDirectDisplayID {
@@ -142,8 +166,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: pointer feed
+    private var lastFed = NSPoint(x: -1e9, y: -1e9)
+
     private func feedPointer() {
+        // Coalesce: skip the eval entirely when the cursor hasn't moved ≥1px —
+        // a parked cursor otherwise costs 30 evaluateJavaScript calls a second.
         let loc = NSEvent.mouseLocation // global screen coords, bottom-left origin
+        if abs(loc.x - lastFed.x) < 1 && abs(loc.y - lastFed.y) < 1 { return }
         var hit: (CGDirectDisplayID, NSScreen)?
         for s in NSScreen.screens where s.frame.contains(loc) { hit = (screenID(s), s); break }
         guard let (id, screen) = hit, let web = views[id] else {
@@ -151,6 +180,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         if feedTarget != id { park(); feedTarget = id }
+        lastFed = loc
         let x = loc.x - screen.frame.origin.x
         let y = screen.frame.height - (loc.y - screen.frame.origin.y) // flip to CSS top-down
         let js = String(format: "window.__feed && __feed(%.1f,%.1f);", x, y)
