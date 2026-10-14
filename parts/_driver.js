@@ -31,6 +31,9 @@ function loop() {
 
 function resize() {
   W = innerWidth; H = innerHeight; ASPECT = W / H;
+  // ≥2.6 covers 32:9 and 32:10 ultrawides (e.g. 5120×1440 Odyssey) while leaving
+  // 21:9 and narrower on the 3-lobe set.
+  OPTS.set = ASPECT >= 2.6 ? FOCI_WIDE : FOCI;
   const d = Math.min(window.devicePixelRatio || 1, 2);
   cv.width = Math.round(W * d); cv.height = Math.round(H * d);
   if (r2d) r2d.render._sp = 0;

@@ -115,6 +115,9 @@ PNG frames (wallpapers, lockscreen exports, A/B comparisons).
 ## Cost & compatibility
 
 - Tested on macOS 15 (Apple Silicon, Retina 3456×2234). `LSMinimumSystemVersion` 13.0.
+- Ultrawide ready: at aspect ≥ 2.6 (32:9 / 32:10, e.g. a 5120×1440 Odyssey) the
+  field switches to a 5-lobe foci set so the aurora stays one continuous band
+  instead of three detached hills. Verified by 5120×1440 render captures.
 - Ad-hoc signed only — Gatekeeper will ask for right-click → Open once.
 - Untested: multi-display layouts (code paths exist), `--interactive` long-term,
   Gatekeeper on managed/MDM machines.

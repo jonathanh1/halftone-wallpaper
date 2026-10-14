@@ -35,6 +35,16 @@ const FOCI_DRIFT = [
   { fx: 0.30, y: -0.05, r: 0.34, c: PAL.indigo,  ph: 1.2, sp: 0.14, ax: 0.05 },
   { fx: 0.72, y:  0.00, r: 0.33, c: PAL.magenta, ph: 3.9, sp: 0.18, ax: 0.05 },
 ];
+// Ultrawide (32:9, 32:10 — aspect ≥ ~2.6): the 3-lobe set opens black valleys, so
+// two interpolated fills bridge them and keep one continuous band. The fill hues
+// are 50/50 mixes of their neighbors so the gradient stays monotonic in x.
+const FOCI_WIDE = [
+  { fx: 0.04, y: -0.04, r: 0.36, c: PAL.magenta,    ph: 0.0, sp: 0.21, ax: 0.055 },
+  { fx: 0.21, y: -0.03, r: 0.30, c: [197, 62, 212], ph: 1.6, sp: 0.17, ax: 0.050 },
+  { fx: 0.50, y:  0.00, r: 0.30, c: PAL.violet,     ph: 2.1, sp: 0.16, ax: 0.045 },
+  { fx: 0.79, y: -0.03, r: 0.30, c: [99, 84, 255],  ph: 3.2, sp: 0.18, ax: 0.050 },
+  { fx: 0.96, y: -0.03, r: 0.38, c: PAL.royal,      ph: 4.4, sp: 0.12, ax: 0.060 },
+];
 // Lobes are wide, low ellipses so they read as one aurora band, not three hills.
 // Portrait screens narrow the lobes (each hue keeps its own territory across ~390px)
 // and lift them, so the band still owns the lower third of a tall phone.
@@ -78,7 +88,11 @@ function fieldAt(x, y, t, foci) {
   let sum = 0;
   for (const f of foci) {
     const dx = (x - f.x) / f.rx, dy = (yy - f.y) / f.ry;
-    const w = Math.exp(-(dx * dx + dy * dy));
+    // d² > 12 → w < 6e-6: invisible in the mix and normalized out anyway. Worth
+    // skipping now that ultrawide runs five foci per dot.
+    const d2 = dx * dx + dy * dy;
+    if (d2 > 12) continue;
+    const w = Math.exp(-d2);
     sum += w;
     for (let k = 0; k < 3; k++) c[k] += f.c[k] * w;
   }
@@ -345,6 +359,9 @@ function loop() {
 
 function resize() {
   W = innerWidth; H = innerHeight; ASPECT = W / H;
+  // ≥2.6 covers 32:9 and 32:10 ultrawides (e.g. 5120×1440 Odyssey) while leaving
+  // 21:9 and narrower on the 3-lobe set.
+  OPTS.set = ASPECT >= 2.6 ? FOCI_WIDE : FOCI;
   const d = Math.min(window.devicePixelRatio || 1, 2);
   cv.width = Math.round(W * d); cv.height = Math.round(H * d);
   if (r2d) r2d.render._sp = 0;
