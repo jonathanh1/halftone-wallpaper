@@ -7,8 +7,10 @@ const reducedMQ = matchMedia("(prefers-reduced-motion: reduce)");
 // `?motion=full` forces animation, `?motion=off` forces the static frame. A wallpaper
 // should move: absent a param, default to "full" — unless the host injected
 // `window.__WP_MOTION` (e.g. the --still flag). matchMedia still authoritative via ?motion=off.
-const motionParam = new URLSearchParams(location.search).get("motion") ?? window.__WP_MOTION ?? "full";
-const motionOff = () => motionParam === "full" ? false : motionParam === "off" || reducedMQ.matches;
+let motionMode = new URLSearchParams(location.search).get("motion") ?? window.__WP_MOTION ?? "full";
+const motionOff = () => motionMode === "full" ? false : motionMode === "off" || reducedMQ.matches;
+// Host-driven live override: --still, battery, or future controls re-evaluate the loop.
+window.__setMotion = m => { motionMode = m; if (r2d) loop(); };
 
 let r2d = null;
 let raf = 0, last = 0;

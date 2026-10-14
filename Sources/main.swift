@@ -1,5 +1,6 @@
 import Cocoa
 import WebKit
+import IOKit.ps
 
 // Borderless desktop-level window hosting a WKWebView that renders the Ripple
 // halftone-aurora field. Click-through by default; desktop icons and Finder
@@ -20,11 +21,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var feedTarget: CGDirectDisplayID? = nil
     private var feedTimer: Timer?
     private var statusItem: NSStatusItem?
+    private var powerSource: CFRunLoopSource?
 
     func applicationDidFinishLaunching(_ n: Notification) {
         NSApp.setActivationPolicy(.accessory) // belt & suspenders on top of LSUIElement
         reconcileWindows()
         installStatusItem()
+        installPowerWatch()
 
         NotificationCenter.default.addObserver(
             self, selector: #selector(screenParamsChanged),
@@ -43,6 +46,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.feedPointer()
             }
         }
+    }
+
+    // MARK: battery-aware motion
+    // Battery freezes the field (the --still effect) and AC resumes it, unless the user
+    // pinned --still (then it stays frozen regardless of power source).
+    private func installPowerWatch() {
+        guard !still else { return }
+        // C function pointer — the literal closure is captured-free except context.
+        let ctx = Unmanaged.passUnretained(self).toOpaque()
+        powerSource = IOPSNotificationCreateRunLoopSource({ context in
+            guard let context else { return }
+            Unmanaged<AppDelegate>.fromOpaque(context).takeUnretainedValue().applyPowerState()
+        }, ctx)?.takeRetainedValue()
+        if let src = powerSource { CFRunLoopAddSource(CFRunLoopGetMain(), src, .defaultMode) }
+        applyPowerState()
+    }
+
+    private func applyPowerState() {
+        guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let list = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef] else { return }
+        var onBattery = false
+        for ps in list {
+            guard let desc = IOPSGetPowerSourceDescription(info, ps)?.takeUnretainedValue() as? [String: Any] else { continue }
+            if (desc["Type"] as? String) == "InternalBattery",
+               (desc["Power Source State"] as? String) == "Battery Power" { onBattery = true }
+        }
+        let js = "window.__setMotion && __setMotion('\(onBattery ? "off" : "full")');"
+        for web in views.values { web.evaluateJavaScript(js, completionHandler: nil) }
     }
 
     private func screenID(_ s: NSScreen) -> CGDirectDisplayID {

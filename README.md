@@ -11,10 +11,9 @@ static picture), so your Mac stays fully usable while the aurora breathes. Drag
 your cursor over it and the dots warp, glow, and spring back.
 
 - **~2.7% CPU** animating at 60 fps on Apple Silicon (WebContent ~0.9%, WebKit GPU ~1.8%)
-- **0.0–0.1% CPU** with `--still` — a frozen, zero-cost frame
-- **No network, no telemetry, no account.** One 150-line Swift file + one standalone HTML file.
-- Multi-display ready — one window per screen, reconciled on display changes
-- Click-through by default — desktop icons, Mission Control and Finder all work normally
+- **0.0–0.1% CPU** with `--still`, and **battery-aware**: unplugging the AC adapter freezes the field automatically; plugging back in resumes it (`--still` pins it frozen regardless of power source)
+- **No network, no telemetry, no account.** One ~180-line Swift file + one standalone HTML file.
+- **Two flavors:** `HalftoneWallpaper.app` (always-desktop-level) or `HalftoneSaver.saver` (OS-native screen saver — on macOS Sonoma+ System Settings can also show it as wallpaper)
 
 ## Install
 
@@ -39,6 +38,16 @@ make install    # builds, installs to ~/Applications + registers a login LaunchA
 clears its quarantine bit, and installs `~/Library/LaunchAgents/local.halftone-wallpaper.plist`
 so it starts automatically at login. `make uninstall` removes both.
 
+### Screen saver (OS-native)
+
+Prefer Apple's own engine? Build the `.saver` bundle — macOS picks it up under **System Settings → Screen Saver → Halftone Aurora** (Sonoma+ also offers "Show as wallpaper"):
+
+```sh
+make install-saver
+```
+
+The saver reuses the same `ripple.html`; preview thumbnails render the frozen frame so Settings doesn't spin WebContent at 60fps.
+
 ### Just try it
 
 ```sh
@@ -56,8 +65,12 @@ make run        # builds + opens
 | Frozen frame (~0 CPU) | `HalftoneWallpaper.app/Contents/MacOS/HalftoneWallpaper --still` |
 | Draggable field (covers icons) | `… --interactive` |
 | No pointer glow | `… --no-pointer` |
+| Battery-aware | unplugging freezes the field; replugging resumes (built-in, no flag) |
 
 The menu-bar **◐** item is the app's only chrome — use it to quit.
+
+- `--still` loads the page with `?motion=off`; the driver renders exactly one frame and drops the rAF loop.
+- A `IOPSNotificationCreateRunLoopSource` watches AC/battery transitions and calls `window.__setMotion('off'|'full')` on the live page — the same code path the flags use.
 
 ## How it works
 
