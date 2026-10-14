@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Halftone Aurora — Ripple (live desktop wallpaper)</title>
+<style>
+* { box-sizing: border-box; margin: 0; }
+html, body { height: 100%; }
+body { background: #000; overflow: hidden; }
+canvas.field { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: default; }
+</style>
+</head>
+<body>
+<canvas id="cv" class="field" aria-label="Halftone aurora wallpaper field."></canvas>
+<script>
+"use strict";
+/* Shared aurora field, expressed in "square uv" units: x,y measured in screen-heights
+   (x spans [0, W/H], y spans [0,1] measured UP from the bottom edge). The same field
+   feeds both renderers, so the 2D and shader variants show identical lighting. */
+
+const PAL = {
+  magenta: [255, 47, 168],
+  violet:  [139, 77, 255],
+  royal:   [59, 91, 255],
+  indigo:  [79, 70, 229],
+};
+
+const FOCI = [
+  { fx: 0.14, y: -0.04, r: 0.36, c: PAL.magenta, ph: 0.0, sp: 0.21, ax: 0.055 },
+  { fx: 0.52, y:  0.00, r: 0.30, c: PAL.violet,  ph: 2.1, sp: 0.16, ax: 0.045 },
+  { fx: 0.88, y: -0.03, r: 0.38, c: PAL.royal,   ph: 4.4, sp: 0.12, ax: 0.060 },
+];
+const FOCI_DRIFT = [
+  { fx: 0.30, y: -0.05, r: 0.34, c: PAL.indigo,  ph: 1.2, sp: 0.14, ax: 0.05 },
+  { fx: 0.72, y:  0.00, r: 0.33, c: PAL.magenta, ph: 3.9, sp: 0.18, ax: 0.05 },
+];
+// Lobes are wide, low ellipses so they read as one aurora band, not three hills.
+// Portrait screens narrow the lobes (each hue keeps its own territory across ~390px)
+// and lift them, so the band still owns the lower third of a tall phone.
+const LOBE_X = 1.4, LOBE_Y = 0.8;
+// Faint ribbon hugging the bottom edge bridges the valleys between lobes.
+const RIBBON = 0.2;
+
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const sstep = (e0, e1, x) => { const t = clamp((x - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t); };
+
+let W = 0, H = 0, ASPECT = 1;
+
+function fociAt(t, set, shift) {
+  const sx = shift ? shift.x : 0, sy = shift ? shift.y : 0;
+  const narrow = clamp(ASPECT / 1.5, 0.4, 1);
+  const kx = LOBE_X * narrow, ky = LOBE_Y * (1.6 - 0.6 * narrow);
+  const out = [];
+  for (const f of set) {
+    out.push({
+      x: f.fx * ASPECT + Math.sin(t * f.sp + f.ph) * f.ax + sx,
+      y: f.y + Math.sin(t * f.sp * 0.8 + f.ph * 1.7) * 0.03 + sy,
+      rx: f.r * kx, ry: f.r * ky, c: f.c,
+    });
+  }
+  return out;
+}
+
+/* Aurora structure. Noise is 1D in x because curtains are vertical: one fbm bends the
+   band into folds, one sets the ionization edge (the bright, sharp lower hem of a
+   curtain), and a coarse+fine pair carves vertical rays. FRAG mirrors these terms. */
+const frac = v => v - Math.floor(v);
+const h11 = p => { p = frac(p * 0.1031); p *= p + 33.33; p *= p + p; return frac(p); };
+const vn = x => { const i = Math.floor(x), f = x - i, a = h11(i); return a + (h11(i + 1) - a) * f * f * (3 - 2 * f); };
+const fbm = x => (0.5 * vn(x) + 0.25 * vn(x * 2.03 + 17) + 0.125 * vn(x * 4.1 + 31)) / 0.875;
+
+// Field at a square-uv point: intensity I, mixed color c, hi = ionization-edge highlight.
+function fieldAt(x, y, t, foci) {
+  const yy = y + 0.04 * Math.sin(x * 5.0 + t * 0.25) + 0.022 * Math.sin(x * 9.0 - t * 0.4)
+    + 0.08 * (fbm(x * 1.7 + t * 0.045) - 0.5);
+  const c = [0, 0, 0];
+  let sum = 0;
+  for (const f of foci) {
+    const dx = (x - f.x) / f.rx, dy = (yy - f.y) / f.ry;
+    const w = Math.exp(-(dx * dx + dy * dy));
+    sum += w;
+    for (let k = 0; k < 3; k++) c[k] += f.c[k] * w;
+  }
+  if (sum > 1e-4) for (let k = 0; k < 3; k++) c[k] /= sum;
+  // Rays: a coarse envelope (where the curtain is bright) carved by fine striations a dot
+  // or two wide, so the curtain reads as many thin rays rather than a few bars.
+  const coarse = clamp((fbm(x * 9 + t * 0.04 + 3.1) - 0.28) * 1.6, 0, 1);
+  const fine = 0.6 * vn(x * 48 + t * 0.05 + 9.7) + 0.4 * vn(x * 97 - t * 0.12 + 4.2);
+  const ray = clamp(coarse * (0.25 + fine) + (fine - 0.5) * 0.3, 0, 1);
+  const d = yy - (0.2 + 0.09 * (fbm(x * 3.1 - t * 0.05 + 11) - 0.5));
+  const above = sstep(-0.035, 0.004, d);
+  const env = Math.min(1, sum * 1.35);
+  // Bright rays reach higher: the top edge breaks into spikes instead of a smooth fade.
+  const fade = 1 - sstep(0.04, 0.44 + 0.26 * ray, yy);
+  const diffuse = fade * Math.min(1, (sum + RIBBON * Math.exp(-yy * yy / 0.06)) * 1.15) * (1 - 0.5 * above * (1 - ray));
+  const curtain = above * Math.exp(-Math.max(0, d) / (0.05 + 0.22 * ray)) * (0.2 + 0.9 * ray);
+  // Hem: sharp below the fold, softer above it.
+  const hi = env * Math.exp(-d * d / (d < 0 ? 0.0002 : 0.0025)) * (0.8 + 0.2 * ray);
+  const I = diffuse + env * (0.5 * curtain + 0.45 * hi) * (1 - sstep(0.36, 0.7, yy));
+  // Ray tops drift toward magenta, as high-altitude emission shifts hue.
+  const m = 0.4 * above * sstep(0.05, 0.3, d);
+  for (let k = 0; k < 3; k++) c[k] += (PAL.magenta[k] - c[k]) * m;
+  return { I, c, hi };
+}
+
+/* ---------- pointer plumbing ---------- */
+const pointer = { x: -1e4, y: -1e4, vx: 0, vy: 0, down: false, px: -1e4, py: -1e4, pt: 0 };
+// Off-canvas pointer: no glow. Used on variant switch, mouse leave, and touch lift
+// (a finger has no hover, so its last position must not stay lit).
+function parkPointer() {
+  pointer.x = pointer.y = pointer.px = pointer.py = -1e4;
+  pointer.vx = pointer.vy = 0; pointer.pt = 0; pointer.down = false;
+}
+function trackPointer(el, cb) {
+  const onMove = (e, isDown) => {
+    const r = el.getBoundingClientRect();
+    const x = e.clientX - r.left, y = e.clientY - r.top;
+    const now = performance.now();
+    const dt = Math.max(8, now - pointer.pt) / 1000;
+    if (pointer.pt) {
+      pointer.vx = clamp((x - pointer.px) / dt, -2600, 2600);
+      pointer.vy = clamp((y - pointer.py) / dt, -2600, 2600);
+    }
+    pointer.px = pointer.x = x; pointer.py = pointer.y = y; pointer.pt = now;
+    cb(x, y, pointer.vx, pointer.vy, isDown ? "drag" : "hover");
+  };
+  el.addEventListener("pointerdown", e => {
+    pointer.down = true; el.classList.add("dragging");
+    try { el.setPointerCapture(e.pointerId); } catch {}
+    onMove(e, true);
+  });
+  el.addEventListener("pointermove", e => onMove(e, pointer.down));
+  const release = e => {
+    if (!pointer.down) return;
+    pointer.down = false; el.classList.remove("dragging");
+    // A pointer held still before lifting has no fling velocity.
+    if (performance.now() - pointer.pt > 90) pointer.vx = pointer.vy = 0;
+    cb(pointer.x, pointer.y, 0, 0, "release");
+    if (e.pointerType !== "mouse") parkPointer();
+  };
+  el.addEventListener("pointerup", release);
+  el.addEventListener("pointercancel", release);
+  el.addEventListener("pointerleave", () => { if (!pointer.down) parkPointer(); });
+}
+
+/* ---------- Canvas 2D renderer (Ripple + Drift + Still) ---------- */
+// Stable per-cell jitter: rebuilds (resize, mobile toolbar show/hide, PNG export) keep the same stipple.
+const hash2 = (i, j) => { const s = Math.sin(i * 127.1 + j * 311.7) * 43758.5453; return s - Math.floor(s); };
+
+function make2D(canvas, scale = Math.min(window.devicePixelRatio || 1, 2)) {
+  const ctx = canvas.getContext("2d");
+  let dots = [], stars = [];
+  let impulses = [];
+  // Under-glow: the field sampled on a coarse grid and upscaled bilinearly beneath the dots,
+  // so light bleeds into the gaps the way an emissive band does through a screen.
+  const GLOW_CELL = 14;
+  const glowC = document.createElement("canvas"), gctx = glowC.getContext("2d");
+  let glowImg = null;
+  // Ink grain: a fixed noise tile multiplied over the frame gives each dot a printed texture.
+  const grainC = document.createElement("canvas");
+  grainC.width = grainC.height = 128;
+  {
+    const g = grainC.getContext("2d"), im = g.createImageData(128, 128);
+    for (let i = 0; i < 128 * 128; i++) {
+      const v = 218 + 37 * hash2((i & 127) + 0.37, (i >> 7) + 0.71);
+      im.data[i * 4] = im.data[i * 4 + 1] = im.data[i * 4 + 2] = v; im.data[i * 4 + 3] = 255;
+    }
+    g.putImageData(im, 0, 0);
+  }
+  const grain = ctx.createPattern(grainC, "repeat");
+
+  function build(spacing) {
+    dots = [];
+    // Rows are anchored to the bottom edge, where the aurora lives.
+    for (let j = 0, y = H + spacing * 0.5; y >= H * 0.30; j++, y -= spacing)
+      for (let i = 0, x = spacing * 0.5; x <= W; i++, x += spacing)
+        dots.push({ bx: x + (hash2(i, j) - 0.5) * spacing * 0.16, by: y + (hash2(j + 71, i) - 0.5) * spacing * 0.16, dx: 0, dy: 0, vx: 0, vy: 0,
+          // Per-dot ink variance: dot gain and density wander cell to cell, like a real screen.
+          g: 0.86 + 0.28 * hash2(i + 13, j + 29), l: 0.92 + 0.12 * hash2(j + 5, i + 41) });
+    // Star field: sparse, deterministic, thinning out as it nears the aurora.
+    stars = [];
+    const n = Math.round(W * H / 4500);
+    for (let s = 0; s < n; s++) {
+      const m = hash2(s + 0.5, s * 1.3), y = H * 0.7 * Math.pow(hash2(7.7, s), 1.3);
+      stars.push({ x: hash2(s, 3.3) * W, y, r: 0.45 + 0.85 * m * m,
+        a: (0.3 + 0.65 * hash2(s * 2.1, 9.2)) * (1 - sstep(H * 0.4, H * 0.7, y)),
+        ph: m * 40, sp: 0.5 + 2.4 * hash2(s, s + 9) });
+    }
+  }
+
+  function impulseQueue(x, y, vx, vy, kind) {
+    if (kind === "release") return;
+    const s = kind === "drag" ? 1.0 : 0.30;
+    impulses.push({ x, y, vx: vx * s, vy: vy * s });
+    if (impulses.length > 6) impulses.shift();
+  }
+
+  function drawStars(t, freeze) {
+    ctx.fillStyle = "#e6e9ff";
+    for (const s of stars) {
+      ctx.globalAlpha = s.a * (freeze ? 1 : 0.65 + 0.35 * Math.sin(t * s.sp + s.ph));
+      ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 6.2832); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawGlow(t, foci, strength) {
+    const y0 = Math.floor(H * 0.25), cell = GLOW_CELL;
+    const gw = Math.ceil(W / cell) + 1, gh = Math.ceil((H - y0) / cell) + 1;
+    if (glowC.width !== gw || glowC.height !== gh || !glowImg) { glowC.width = gw; glowC.height = gh; glowImg = gctx.createImageData(gw, gh); }
+    const px = glowImg.data;
+    for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) {
+      const f = fieldAt(i * cell / H, (H - y0 - j * cell) / H, t, foci);
+      const a = Math.min(1, f.I) * strength, o = (j * gw + i) * 4;
+      px[o] = f.c[0] * a; px[o + 1] = f.c[1] * a; px[o + 2] = f.c[2] * a; px[o + 3] = 255;
+    }
+    gctx.putImageData(glowImg, 0, 0);
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
+    // texel i is centered on x = i·cell
+    ctx.drawImage(glowC, -cell / 2, y0 - cell / 2, gw * cell, gh * cell);
+  }
+
+  function drawGrain(t, freeze) {
+    const f = freeze ? 0 : Math.floor(t * 24);
+    const ox = (h11(f + 0.5) * 128) | 0, oy = (h11(f + 77.7) * 128) | 0;
+    ctx.setTransform(1, 0, 0, 1, ox, oy);
+    ctx.globalCompositeOperation = "multiply";
+    ctx.fillStyle = grain; ctx.fillRect(-ox, -oy, canvas.width, canvas.height);
+    ctx.globalCompositeOperation = "source-over";
+  }
+
+  const q = v => (v > 255 ? 255 : v) & 0xF8;
+  function bucket(map, R, G, B) {
+    const key = R << 16 | G << 8 | B;
+    let b = map.get(key);
+    if (!b) { b = { path: new Path2D(), col: `rgb(${R},${G},${B})` }; map.set(key, b); }
+    return b.path;
+  }
+
+  function render(t, dt, opts) {
+    const { spacing, rMax, set, warp, glow, shift, freeze, under } = opts;
+    if (dots.length === 0 || spacing !== render._sp) { build(spacing); render._sp = spacing; }
+    ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H);
+
+    const foci = fociAt(t, set, shift && shift());
+    drawStars(t, freeze);
+    drawGlow(t, foci, under);
+    const k = 96, c = 13;
+    const buckets = new Map(), halos = new Map();
+    const fringeR = new Path2D(), fringeB = new Path2D();
+
+    for (const d of dots) {
+      if (warp && !freeze) {
+        d.vx += (-k * d.dx - c * d.vx) * dt;
+        d.vy += (-k * d.dy - c * d.vy) * dt;
+        d.dx = clamp(d.dx + d.vx * dt, -18, 18);
+        d.dy = clamp(d.dy + d.vy * dt, -18, 18);
+        for (const im of impulses) {
+          const ox = d.bx - im.x, oy = d.by - im.y;
+          const g = Math.exp(-(ox * ox + oy * oy) / (2 * 130 * 130));
+          const sp = Math.hypot(im.vx, im.vy);
+          const od = Math.max(1, Math.hypot(ox, oy));
+          // drag direction + outward "parting" component → fluid warp, not smear
+          d.vx += (im.vx * 0.8 + (ox / od) * sp * 0.5) * g * 0.12;
+          d.vy += (im.vy * 0.8 + (oy / od) * sp * 0.5) * g * 0.12;
+        }
+      }
+      const px = d.bx + d.dx, py = d.by + d.dy;
+      const f = fieldAt(d.bx / H, (H - d.by) / H, t, foci);
+      let I = f.I;
+      I += (freeze ? 0 : 0.07) * Math.sin(d.bx * 0.02 + d.by * 0.012 - t * 1.15) * (1 - sstep(0.1, 0.5, (H - d.by) / H));
+      if (glow && pointer.x > -999) {
+        const ox = px - pointer.x, oy = py - pointer.y;
+        I += 0.55 * Math.exp(-(ox * ox + oy * oy) / (2 * 130 * 130)) * (pointer.down ? 1 : 0.45);
+      }
+      I = clamp(I, 0, 1.25);
+      const r = rMax * d.g * Math.pow(Math.min(I, 1.1), 0.78);
+      if (r < 0.28) continue;
+      const lum = (0.55 + 0.45 * Math.min(1, I)) * d.l;
+      // Ink saturation: the ionization edge and overdriven dots bleach toward white.
+      const wht = clamp(f.hi * 0.3 + (I - 1.05) * 0.5, 0, 0.34);
+      const R = q(f.c[0] * lum + (255 - f.c[0] * lum) * wht);
+      const G = q(f.c[1] * lum + (235 - f.c[1] * lum) * wht);
+      const B = q(f.c[2] * lum + (255 - f.c[2] * lum) * wht);
+      const p = bucket(buckets, R, G, B);
+      p.moveTo(px + r, py); p.arc(px, py, r, 0, 6.2832);
+      if (I > 0.95 || wht > 0.15) {
+        // Bloom: hot dots spill light past their edge.
+        const h = bucket(halos, R, G, B), hr = r * 2.1;
+        h.moveTo(px + hr, py); h.arc(px, py, hr, 0, 6.2832);
+      }
+      if (wht > 0.25) {
+        // Chromatic fringe: red and blue rims split off the brightest dots.
+        fringeR.moveTo(px + r + 0.8, py); fringeR.arc(px + 0.8, py, r, 0, 6.2832);
+        fringeB.moveTo(px + r - 0.8, py); fringeB.arc(px - 0.8, py, r, 0, 6.2832);
+      }
+    }
+    impulses.length = 0;
+    ctx.globalCompositeOperation = "lighter";
+    ctx.fillStyle = "rgba(255,40,110,0.75)"; ctx.fill(fringeR);
+    ctx.fillStyle = "rgba(40,140,255,0.75)"; ctx.fill(fringeB);
+    ctx.globalCompositeOperation = "source-over";
+    for (const b of buckets.values()) { ctx.fillStyle = b.col; ctx.fill(b.path); }
+    ctx.globalCompositeOperation = "lighter";
+    ctx.globalAlpha = 0.1;
+    for (const b of halos.values()) { ctx.fillStyle = b.col; ctx.fill(b.path); }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+    drawGrain(t, freeze);
+  }
+  return { render, impulseQueue };
+}
+
+/* ---------- wallpaper driver (Ripple only, pinned variant) ---------- */
+// Extracted for HalftoneWallpaper.app: same opts as halftone-aurora.html's ripple
+// branch { spacing: 11, rMax: 4.8, set: FOCI, warp: true, glow: true, under: 0.22 }.
+const cv = document.getElementById("cv");
+const reducedMQ = matchMedia("(prefers-reduced-motion: reduce)");
+// `?motion=full` forces animation, `?motion=off` forces the static frame. A wallpaper
+// should move: absent a param, default to "full" (matchMedia still authoritative via ?motion=off).
+const motionParam = new URLSearchParams(location.search).get("motion") ?? "full";
+const motionOff = () => motionParam === "full" ? false : motionParam === "off" || reducedMQ.matches;
+
+let r2d = null;
+let raf = 0, last = 0;
+const t0 = performance.now() / 1000;
+
+const OPTS = { spacing: 11, rMax: 4.8, set: FOCI, warp: true, glow: true, shift: null, freeze: false, under: 0.22 };
+function loop() {
+  cancelAnimationFrame(raf);
+  const step = now => {
+    const t = motionOff() ? 4.2 : now / 1000 - t0;
+    const dt = Math.min(0.033, (now - last) / 1000 || 0.016); last = now;
+    OPTS.freeze = motionOff();
+    r2d.render(t, dt, OPTS);
+    if (!motionOff()) raf = requestAnimationFrame(step);
+  };
+  raf = requestAnimationFrame(step);
+}
+
+function resize() {
+  W = innerWidth; H = innerHeight; ASPECT = W / H;
+  const d = Math.min(window.devicePixelRatio || 1, 2);
+  cv.width = Math.round(W * d); cv.height = Math.round(H * d);
+  if (r2d) r2d.render._sp = 0;
+  // Resizing clears the canvas; if we're showing a static frame there is no next tick to repaint.
+  if (r2d) loop();
+}
+addEventListener("resize", resize);
+reducedMQ.addEventListener?.("change", () => { if (r2d) loop(); });
+
+// Real pointer path — used when the hosting window accepts events (--interactive).
+trackPointer(cv, (x, y, vx, vy, kind) => r2d.impulseQueue(x, y, vx, vy, kind));
+
+/* Synthetic pointer feed for the click-through window: the host watches the global
+   cursor (NSEvent.mouseLocation) and injects CSS-pixel positions so the field still
+   warps and glows under the pointer even though the window never receives events. */
+window.__feed = function (x, y) {
+  const now = performance.now();
+  const dt = Math.max(8, now - pointer.pt) / 1000;
+  if (pointer.pt) {
+    pointer.vx = clamp((x - pointer.px) / dt, -2600, 2600);
+    pointer.vy = clamp((y - pointer.py) / dt, -2600, 2600);
+  }
+  pointer.px = pointer.x = x; pointer.py = pointer.y = y; pointer.pt = now;
+  if (r2d) r2d.impulseQueue(x, y, pointer.vx, pointer.vy, "hover");
+};
+window.__park = parkPointer;
+
+resize();
+r2d = make2D(cv);
+loop();
+</script>
+</body>
+</html>
