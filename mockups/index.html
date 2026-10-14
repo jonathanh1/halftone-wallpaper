@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Halftone Aurora — Mockups</title>
+<link rel="stylesheet" href="_kit-skin.css" />
+<style>
+* { box-sizing: border-box; margin: 0; }
+body { font-family: var(--sans); font-size: 14px; line-height: 21px; color: var(--ink); background: radial-gradient(1200px 700px at 70% -10%, rgba(94,224,197,0.05), transparent 55%), var(--canvas); -webkit-font-smoothing: antialiased; min-height: 100vh; }
+.wrap { max-width: 900px; margin: 0 auto; padding: 48px 36px 80px; }
+.eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); margin-bottom: 12px; }
+h1 { font-size: 30px; font-weight: 650; }
+.lede { max-width: 70ch; color: var(--secondary); margin-top: 10px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; margin-top: 28px; }
+a.page { display: block; padding: 16px 18px; border-radius: 12px; background: var(--surface-subtle); text-decoration: none; color: var(--ink); border: 1px solid transparent; transition: border-color .15s; }
+a.page:hover { border-color: var(--divider); }
+a.page .href { font-family: var(--mono); font-size: 11px; color: var(--accent); }
+a.page h3 { font-size: 15px; font-weight: 600; margin-top: 4px; }
+a.page p { font-size: 12px; color: var(--secondary); margin-top: 6px; line-height: 17px; }
+.note { margin-top: 24px; padding: 12px 14px; border-radius: 10px; background: var(--surface-subtle); color: var(--secondary); font-size: 12px; line-height: 18px; }
+footer { margin-top: 44px; padding-top: 16px; border-top: 1px solid var(--divider); font-size: 11.5px; color: var(--disabled); font-family: var(--mono); }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+ <div class="eyebrow">Halftone Aurora · mockups</div>
+ <h1>Interactive dot-matrix backgrounds</h1>
+ <p class="lede">The full-screen halftone aurora studies that seeded both the Halftone Veil application skin (ohmygui §3.1.22) and this repo's desktop wallpaper / screen saver. Shared runtime: <code>_halftone.js</code> / <code>_halftone.css</code>.</p>
+</header>
+<div class="grid">
+ <a class="page" href="halftone-aurora.html"><span class="href">halftone-aurora.html</span><h3>Switcher</h3><p>Ripple, Force, Drift and Still in one page. <code>?motion=full|off</code> overrides the gate.</p></a>
+ <a class="page" href="halftone-ripple.html"><span class="href">halftone-ripple.html</span><h3>Ripple</h3><p>Canvas 2D spring-warp field — the composition adopted as Halftone Veil.</p></a>
+ <a class="page" href="halftone-force.html"><span class="href">halftone-force.html</span><h3>Force</h3><p>WebGL shader: drag displaces and lights the wake, release rebounds.</p></a>
+ <a class="page" href="halftone-drift.html"><span class="href">halftone-drift.html</span><h3>Drift</h3><p>Ambient stipple; foci shift under a fixed grid.</p></a>
+ <a class="page" href="halftone-cascade.html"><span class="href">halftone-cascade.html</span><h3>Cascade</h3><p>Falling-field variant.</p></a>
+ <a class="page" href="halftone-corona.html"><span class="href">halftone-corona.html</span><h3>Corona</h3><p>Aurora seen from beneath; drag pulls the zenith off-center.</p></a>
+ <a class="page" href="halftone-wallpaper.html"><span class="href">halftone-wallpaper.html</span><h3>Wallpaper</h3><p>Single frozen frame + PNG export.</p></a>
+ <a class="page" href="halftone-skins.html"><span class="href">halftone-skins.html</span><h3>Skin study</h3><p>Side-by-side comparison of Ripple / Corona / Cascade against the §3.1.8 pane-sky contract; the source record for adopting Veil.</p></a>
+</div>
+<div class="note">Rendered captures live in <code>../renders/</code>. These pages are provenance for the shipped skin and the wallpaper/saver — edit copies, not the ohmygui tokens.</div>
+<footer>halftone-wallpaper repo · separated from ohmygui .design/ 2026-10-14</footer>
+</div>
+</body>
+</html>

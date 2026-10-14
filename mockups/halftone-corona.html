@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Halftone Aurora — Corona</title>
+<link rel="stylesheet" href="_kit-skin.css" />
+<link rel="stylesheet" href="_halftone.css" />
+<style>
+/* ?clean hides every overlay for wallpaper/screenshot captures */
+body.clean .bar, body.clean .caption, body.clean footer.hf { display: none; }
+</style>
+</head>
+<body>
+<script>if (new URLSearchParams(location.search).get("clean")) document.body.classList.add("clean");</script>
+<canvas id="cv" class="field" aria-label="Interactive halftone aurora corona seen from directly beneath. Drag to pull the zenith off-center and swirl the crown."></canvas>
+<div class="bar"><span class="name">Corona</span><a class="back" href="index.html">← mockups</a></div>
+<div class="caption" id="cap"></div>
+<footer class="hf"><span class="status proposal">proposal</span><span id="fileName"></span></footer>
+<script src="_halftone.js"></script>
+<script>
+"use strict";
+/* The aurora seen lying underneath it: curtain rays converge on the zenith and splay
+   outward as a crown. Polar field (angle tables rebuilt per frame) sampled by a fixed
+   halftone screen; dot radius carries luminance. */
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const DPR = Math.min(window.devicePixelRatio || 1, 2);
+const sky = HA.makeSky(cv, ctx);           // grain layer only; stars/glow are radial here
+const { clamp, sstep, hash2, PAL } = HA;
+const TAU = Math.PI * 2;
+
+HA.chrome({
+  name: "Corona",
+  body: "Canvas 2D · the aurora seen from directly beneath: curtain rays converge on the zenith and splay outward as a crown of magenta/violet/royal dots, brightest at the center.",
+  hint: "drag — pull the zenith off-center and swirl the crown; release springs it home",
+  file: "halftone-corona.html",
+});
+
+/* ---------- noise ---------- */
+const vn2 = (x, y) => {
+  const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const a = hash2(xi, yi), b = hash2(xi + 1, yi), c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+};
+const fbm2 = (x, y) => (0.5 * vn2(x, y) + 0.25 * vn2(x * 2.03 + 5.2, y * 2.03 + 1.3) + 0.125 * vn2(x * 4.1 + 9.7, y * 4.1 + 3.1)) / 0.875;
+
+/* ---------- angular tables: sampled on a circle so they wrap seamlessly ---------- */
+const N = 1024;
+const rayA = new Float32Array(N), rayB = new Float32Array(N), lenT = new Float32Array(N), lobeT = new Float32Array(N);
+const hemR = new Float32Array(N), hemA = new Float32Array(N), phT = new Float32Array(N);
+const colR = new Float32Array(N), colG = new Float32Array(N), colB = new Float32Array(N);
+const LOBES = [
+  { c: PAL.magenta, a: 0.4 },
+  { c: PAL.violet,  a: 2.5 },
+  { c: PAL.royal,   a: 4.4 },
+];
+const angDist = (a, b) => { let d = (a - b) % TAU; if (d < -Math.PI) d += TAU; if (d > Math.PI) d -= TAU; return d; };
+function buildTables(t) {
+  const rot = t * 0.018;
+  for (let i = 0; i < N; i++) {
+    const a = i / N * TAU, cs = Math.cos(a), sn = Math.sin(a);
+    // two fine ray fields (inner/outer) so streaks fork and re-merge along their length
+    rayA[i] = sstep(0.36, 0.66, fbm2(cs * 24 + t * 0.05, sn * 24 - t * 0.035));
+    rayB[i] = sstep(0.38, 0.68, fbm2(cs * 38 + 17.3 - t * 0.04, sn * 38 + 5.1 + t * 0.03));
+    lenT[i] = 0.72 + 0.6 * fbm2(cs * 2.6 + 40 + t * 0.03, sn * 2.6 + 11);         // curtain reach
+    lobeT[i] = 0.62 + 0.55 * fbm2(cs * 6 + 80 - t * 0.02, sn * 6 + 3);             // fold brightness
+    hemR[i] = 0.17 + 0.09 * fbm2(cs * 3 + 120, sn * 3 + t * 0.04);                 // broken hem ring
+    hemA[i] = sstep(0.48, 0.78, fbm2(cs * 5 + 200 + t * 0.05, sn * 5 + 9));
+    phT[i] = 9 * fbm2(cs * 6 + 300, sn * 6 + 7);
+    let r = 0, g = 0, b = 0, ws = 0;
+    for (const L of LOBES) {
+      const d = angDist(a, L.a + rot), w = Math.exp(-d * d / (2 * 0.8 * 0.8));
+      r += L.c[0] * w; g += L.c[1] * w; b += L.c[2] * w; ws += w;
+    }
+    colR[i] = r / ws; colG[i] = g / ws; colB[i] = b / ws;
+  }
+}
+
+/* ---------- corona state ---------- */
+const C = { bx: 0, by: 0, x: 0, y: 0, R: 1, tw: 0 };
+const S = { ox: 0, oy: 0, vx: 0, vy: 0, vt: 0 };          // off-center spring + swirl spring
+
+// Field at a pixel; writes fI (intensity), fHi (hem highlight), fR/fG/fB (color),
+// fRho (normalized radius) and fDir (local ray direction, so dots can stretch along it).
+let fI = 0, fHi = 0, fR = 0, fG = 0, fB = 0, fRho = 0, fDir = 0;
+function field(x, y, t) {
+  const dx = x - C.x, dy = y - C.y;
+  const rho = Math.sqrt(dx * dx + dy * dy) / C.R;
+  const th0 = Math.atan2(dy, dx);
+  // swirl (pointer) + slow curl so rays bend instead of running ruler-straight
+  const sw = C.tw * Math.exp(-rho * 1.3), k1 = rho * 5 - t * 0.35 + th0 * 3, k2 = rho * 12 + t * 0.5 + th0 * 7;
+  const th = th0 + sw + 0.07 * Math.sin(k1) + 0.035 * Math.sin(k2);
+  // a ray is a curve of constant warped angle; its screen heading leans by atan(ρ·dθ/dρ)
+  fRho = rho;
+  fDir = th0 + Math.atan(rho * (1.3 * sw - 0.35 * Math.cos(k1) - 0.42 * Math.cos(k2)));
+  let u = th / TAU; u -= Math.floor(u);
+  const fi = u * N, i0 = fi | 0, i1 = (i0 + 1) & (N - 1), w = fi - i0;
+  const ra = rayA[i0] + (rayA[i1] - rayA[i0]) * w, rb = rayB[i0] + (rayB[i1] - rayB[i0]) * w;
+  const r0 = rho / (lenT[i0] + (lenT[i1] - lenT[i0]) * w);
+  const fine = ra + (rb - ra) * sstep(0.15, 0.85, r0);
+  const q = r0 / (0.78 + 0.4 * fine);                  // bright rays reach farther: ragged crown edge
+  const e = 1 - sstep(0.05, 1, q);
+  const env = e * e;
+  const core = sstep(0.02, 0.13, rho);                 // rays converge into one glow at the zenith
+  const rays = 1 + (0.06 + 1.1 * fine - 1) * core;
+  const lob = lobeT[i0] + (lobeT[i1] - lobeT[i0]) * w;
+  const ph = phT[i0] + (phT[i1] - phT[i0]) * w;
+  const pulse = 0.86 + 0.14 * Math.sin(rho * 17 + t * 1.7 + ph);   // flicker streaming down the rays
+  const hr = (rho - (hemR[i0] + (hemR[i1] - hemR[i0]) * w)) / 0.026;
+  const hi = Math.exp(-hr * hr) * (hemA[i0] + (hemA[i1] - hemA[i0]) * w) * env * core;
+  const zen = Math.exp(-rho * rho / 0.006);
+  fI = env * rays * lob * pulse * 1.3 + hi * 0.45 + zen * 0.4;
+  fHi = hi + zen * 0.7;
+  let r = colR[i0] + (colR[i1] - colR[i0]) * w, g = colG[i0] + (colG[i1] - colG[i0]) * w, b = colB[i0] + (colB[i1] - colB[i0]) * w;
+  const m = sstep(0.45, 1, q) * 0.42;                  // ray tips drift magenta
+  r += (PAL.magenta[0] - r) * m; g += (PAL.magenta[1] - g) * m; b += (PAL.magenta[2] - b) * m;
+  const p = (1 - sstep(0, 0.16, rho)) * 0.45;           // pale violet zenith
+  fR = r + (214 - r) * p; fG = g + (190 - g) * p; fB = b + (255 - b) * p;
+}
+
+/* ---------- layout ---------- */
+let dots = [], stars = [], spacing = 10;
+const GLOW_CELL = 12;
+const glowC = document.createElement("canvas"), gctx = glowC.getContext("2d");
+let glowImg = null;
+function build() {
+  const { W, H } = HA.dims;
+  spacing = W < 520 ? 9 : 10;
+  // ?zen=0..1 overrides the zenith's vertical position (fraction of height);
+  // lower values sit the crown under a phone's clock for wallpaper captures.
+  const zen = parseFloat(new URLSearchParams(location.search).get("zen"));
+  C.bx = W * 0.5; C.by = H * (Number.isFinite(zen) ? zen : (W < 520 ? 0.42 : 0.45));
+  C.R = (W < 520 ? 0.48 : 0.42) * Math.sqrt(W * H);
+  dots = [];
+  const ox = (W % spacing) / 2 + spacing / 2, oy = (H % spacing) / 2 + spacing / 2;
+  for (let j = 0; oy + j * spacing < H + spacing; j++)
+    for (let i = 0; ox + i * spacing < W + spacing; i++)
+      dots.push({
+        x: ox + i * spacing + (hash2(i + 0.3, j) - 0.5) * spacing * 0.18,
+        y: oy + j * spacing + (hash2(i, j + 0.7) - 0.5) * spacing * 0.18,
+        g: 0.84 + 0.32 * hash2(i * 1.7, j * 2.3), l: 0.9 + 0.14 * hash2(j * 3.1, i * 0.9),
+      });
+  stars = [];
+  const n = Math.round(W * H / 6500);
+  for (let s = 0; s < n; s++) {
+    const m = hash2(s + 0.5, s * 1.3);
+    stars.push({ x: hash2(s, 3.3) * W, y: hash2(7.7, s) * H, r: 0.4 + 0.75 * m * m,
+      a: 0.22 + 0.5 * hash2(s * 2.1, 9.2), ph: m * 40, sp: 0.5 + 2.4 * hash2(s, s + 9) });
+  }
+}
+
+/* ---------- pointer: drag pulls the zenith toward the finger and torques the crown ---------- */
+HA.trackPointer(cv, (x, y, vx, vy, kind) => {
+  if (kind === "release") return;
+  const s = kind === "drag" ? 1 : 0.25;
+  const dx = x - C.x, dy = y - C.y, d2 = dx * dx + dy * dy + (0.18 * C.R) ** 2;
+  S.vt = clamp(S.vt + clamp((dx * vy - dy * vx) / d2, -14, 14) * 0.06 * s, -6, 6);
+});
+
+function physics(dt) {
+  const p = HA.pointer, live = p.x > -999;
+  const age = (performance.now() - p.pt) / 1000;
+  const amt = !live ? 0 : p.down ? 0.42 : 0.1 * Math.exp(-age / 0.6);   // hover fades once the cursor rests
+  const tx = live ? (p.x - C.bx) * amt : 0, ty = live ? (p.y - C.by) * amt : 0;
+  S.vx += (38 * (tx - S.ox) - 6.5 * S.vx) * dt; S.ox += S.vx * dt;     // ζ≈0.53: overshoots on release
+  S.vy += (38 * (ty - S.oy) - 6.5 * S.vy) * dt; S.oy += S.vy * dt;
+  S.vt += (-12 * C.tw - 3.2 * S.vt) * dt;
+  C.tw = clamp(C.tw + S.vt * dt, -1.8, 1.8);
+}
+
+function drawGlow(t) {
+  const { W, H } = HA.dims, cell = GLOW_CELL;
+  const gw = Math.ceil(W / cell) + 1, gh = Math.ceil(H / cell) + 1;
+  if (glowC.width !== gw || glowC.height !== gh || !glowImg) { glowC.width = gw; glowC.height = gh; glowImg = gctx.createImageData(gw, gh); }
+  const px = glowImg.data;
+  for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) {
+    field(i * cell, j * cell, t);
+    const a = Math.min(1, fI) * 0.3, o = (j * gw + i) * 4;
+    px[o] = fR * a; px[o + 1] = fG * a; px[o + 2] = fB * a; px[o + 3] = 255;
+  }
+  gctx.putImageData(glowImg, 0, 0);
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
+  ctx.globalCompositeOperation = "lighter";
+  ctx.drawImage(glowC, -cell / 2, -cell / 2, gw * cell, gh * cell);
+  ctx.globalCompositeOperation = "source-over";
+}
+
+function draw(t, dt) {
+  const { W, H } = HA.dims;
+  const freeze = HA.motionOff();
+  if (!freeze) physics(dt);
+  C.x = C.bx + S.ox; C.y = C.by + S.oy;
+  buildTables(t);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H);
+
+  // stars: sparse, and swallowed by the crown's light near the zenith
+  ctx.fillStyle = "#e6e9ff";
+  for (const s of stars) {
+    const rho = Math.hypot(s.x - C.x, s.y - C.y) / C.R;
+    const a = s.a * sstep(0.45, 1.25, rho) * (freeze ? 1 : 0.65 + 0.35 * Math.sin(t * s.sp + s.ph));
+    if (a < 0.02) continue;
+    ctx.globalAlpha = a;
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  drawGlow(t);
+
+  const p = HA.pointer, live = p.x > -999;
+  const wake = !live ? 0 : p.down ? 0.3 : 0.1 * Math.exp(-(performance.now() - p.pt) / 600);
+  const rMax = spacing * 0.46;
+  const buckets = new Map(), halos = new Map();
+  for (const d of dots) {
+    field(d.x, d.y, t);
+    let I = fI;
+    if (wake > 0.005) { const ox = d.x - p.x, oy = d.y - p.y; I += wake * Math.exp(-(ox * ox + oy * oy) / (2 * 120 * 120)) * Math.min(1, fI * 3 + 0.15); }
+    if (I < 0.012) continue;
+    I = Math.min(I, 1.3);
+    const r = rMax * d.g * Math.pow(Math.min(I, 1.08), 0.85);
+    // dots stretch along their ray (area-preserving), strongest mid-crown, round at the zenith
+    const st = 1 + 0.75 * sstep(0.06, 0.45, fRho) * Math.min(1, I * 1.4), ra = r * Math.sqrt(st), rb = r / Math.sqrt(st);
+    if (r < 0.3) continue;
+    const { R, G, B, wht } = HA.ink([fR, fG, fB], I, fHi, d.l);
+    const path = HA.bucket(buckets, R, G, B);
+    path.moveTo(d.x + ra * Math.cos(fDir), d.y + ra * Math.sin(fDir)); path.ellipse(d.x, d.y, ra, rb, fDir, 0, TAU);
+    if (I > 0.98 || wht > 0.15) {
+      const h = HA.bucket(halos, R, G, B), hr = r * 2.1;
+      h.moveTo(d.x + ra * 2.1 * Math.cos(fDir), d.y + ra * 2.1 * Math.sin(fDir)); h.ellipse(d.x, d.y, ra * 2.1, hr, fDir, 0, TAU);
+    }
+  }
+  for (const b of buckets.values()) { ctx.fillStyle = b.col; ctx.fill(b.path); }
+  ctx.globalCompositeOperation = "lighter";
+  ctx.globalAlpha = 0.1;
+  for (const b of halos.values()) { ctx.fillStyle = b.col; ctx.fill(b.path); }
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = "source-over";
+  sky.drawGrain(t, freeze);
+}
+
+HA.fit([cv]); build();
+addEventListener("resize", () => { HA.fit([cv]); build(); if (HA.motionOff()) draw(4.2, 0.016); });
+HA.start(draw);
+</script>
+</body>
+</html>

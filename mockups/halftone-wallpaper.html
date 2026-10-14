@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Halftone Aurora — Wallpaper</title>
+<link rel="stylesheet" href="_kit-skin.css" />
+<link rel="stylesheet" href="_halftone.css" />
+</head>
+<body>
+<canvas id="cv" class="field" aria-label="Static halftone aurora wallpaper frame."></canvas>
+<div class="bar"><span class="name">Wallpaper</span><a class="back" href="index.html">← mockups</a></div>
+<div class="caption" id="cap"></div>
+<div class="dl"><a id="dlLink" href="#" download="halftone-aurora.png">↓ PNG</a></div>
+<footer class="hf"><span class="status proposal">proposal</span><span id="fileName"></span></footer>
+<script src="_halftone.js"></script>
+<script>
+"use strict";
+const cv = document.getElementById("cv");
+const r = HA.make2D(cv);
+const dl = document.getElementById("dlLink");
+HA.chrome({
+  name: "Wallpaper",
+  body: "Single frame · the image-prompt composition: stars above, a rayed magenta/violet/royal dot-matrix aurora curtain below. Rendered once, no motion.",
+  hint: "↓ PNG saves the current frame",
+  file: "halftone-wallpaper.html",
+});
+function paint() {
+  HA.fit([cv]);
+  r.render(4.2, 0.016, { spacing: 12, rMax: 5.0, set: HA.FOCI, warp: false, glow: false, shift: null, freeze: true, under: 0.24 });
+  cv.toBlob(b => { if (b) dl.href = URL.createObjectURL(b); });
+}
+addEventListener("resize", paint);
+paint();
+</script>
+</body>
+</html>

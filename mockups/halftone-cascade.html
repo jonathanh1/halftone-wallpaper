@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Halftone Aurora — Cascade</title>
+<link rel="stylesheet" href="_kit-skin.css" />
+<link rel="stylesheet" href="_halftone.css" />
+</head>
+<body>
+<canvas id="cv" class="field" aria-label="Interactive cascade field. Dots rain down through the aurora; drag to push them sideways."></canvas>
+<div class="bar"><span class="name">Cascade</span><a class="back" href="index.html">← mockups</a></div>
+<div class="caption" id="cap"></div>
+<footer class="hf"><span class="status proposal">proposal</span><span id="fileName"></span></footer>
+<script src="_halftone.js"></script>
+<script>
+"use strict";
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const DPR = Math.min(window.devicePixelRatio || 1, 2);
+const sky = HA.makeSky(cv, ctx);
+let drops = [];
+let spacing = 14;
+
+HA.chrome({
+  name: "Cascade",
+  body: "Canvas 2D · dots rain down through the aurora, igniting as they cross its bands. No grid anchor — the field itself is falling.",
+  hint: "drag — shove the falling dots sideways; they keep falling",
+  file: "halftone-cascade.html",
+});
+// Each drop carries its own ink: dot gain (g) and density (l) vary like a hand-pulled screen.
+const spawn = (x, y) => ({ x, y, vy: 34 + Math.random() * 58, dx: 0, vx: 0, sway: Math.random() * 6.28,
+  g: 0.82 + 0.36 * Math.random(), l: 0.9 + 0.14 * Math.random() });
+function build() {
+  const { W, H } = HA.dims;
+  drops = [];
+  for (let x = spacing * 0.5; x <= W; x += spacing)
+    for (let k = 0; k < 3; k++)
+      drops.push(spawn(x + (Math.random() - 0.5) * 6, H * 0.30 + Math.random() * H * 0.75));
+  sky.buildStars();
+}
+
+HA.trackPointer(cv, (x, y, vx, vy, kind) => {
+  if (kind === "release") return;
+  const s = kind === "drag" ? 1 : 0.25;
+  for (const d of drops) {
+    const ox = d.x + d.dx - x, oy = d.y - y;
+    const g = Math.exp(-(ox * ox + oy * oy) / (2 * 150 * 150));
+    const od = Math.max(1, Math.hypot(ox, oy));
+    d.vx += (vx * 0.9 + (ox / od) * Math.hypot(vx, vy) * 0.4) * g * 0.10 * s;
+    d.vy += vy * g * 0.04 * s;
+  }
+});
+
+function draw(t, dt) {
+  const { W, H } = HA.dims;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H);
+  const foci = HA.fociAt(t, HA.FOCI, null);
+  const freeze = HA.motionOff();
+  // Drops are sparse (3 per column), so the under-glow carries the curtain between them.
+  sky.drawStars(t, freeze);
+  sky.drawGlow(t, foci, 0.2);
+  const buckets = new Map(), halos = new Map();
+  for (const d of drops) {
+    if (!freeze) {
+      d.y += d.vy * dt;
+      d.sway += dt * 0.9;
+      d.vx += -3.2 * d.dx * dt - 5 * d.vx * dt;   // weak pull home, mild drag
+      d.dx = HA.clamp(d.dx + d.vx * dt, -42, 42);
+      d.vy = HA.clamp(d.vy + (46 - d.vy) * 0.25 * dt, 8, 320);
+      if (d.y > H + 8) Object.assign(d, spawn(d.x, H * 0.30 - Math.random() * 60));
+    }
+    const px = d.x + d.dx + Math.sin(d.sway) * 2.2;
+    const f = HA.fieldAt(px / H, (H - d.y) / H, t, foci);
+    let I = f.I * 1.15 * (0.65 + 0.35 * Math.min(1, d.vy / 120)); // faster fallers read brighter — motion trails
+    if (HA.pointer.x > -999) {
+      const ox = px - HA.pointer.x, oy = d.y - HA.pointer.y;
+      I += 0.45 * Math.exp(-(ox * ox + oy * oy) / (2 * 130 * 130)) * (HA.pointer.down ? 1 : 0.4);
+    }
+    I = HA.clamp(I, 0, 1.25);
+    const r = 5.2 * d.g * Math.pow(Math.min(I, 1.1), 0.8);
+    if (r < 0.28) continue;
+    // Crossing the curtain's hem bleaches a drop toward white; hot drops bloom.
+    const { R, G, B, wht } = HA.ink(f.c, I, f.hi, d.l);
+    const p = HA.bucket(buckets, R, G, B);
+    p.moveTo(px + r, d.y); p.arc(px, d.y, r, 0, 6.2832);
+    if (I > 0.95 || wht > 0.15) {
+      const h = HA.bucket(halos, R, G, B), hr = r * 2.2;
+      h.moveTo(px + hr, d.y); h.arc(px, d.y, hr, 0, 6.2832);
+    }
+  }
+  for (const b of buckets.values()) { ctx.fillStyle = b.col; ctx.fill(b.path); }
+  ctx.globalCompositeOperation = "lighter";
+  ctx.globalAlpha = 0.12;
+  for (const b of halos.values()) { ctx.fillStyle = b.col; ctx.fill(b.path); }
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = "source-over";
+  sky.drawGrain(t, freeze);
+}
+
+HA.fit([cv]); build();
+addEventListener("resize", () => { HA.fit([cv]); build(); if (HA.motionOff()) draw(4.2, 0.016); });
+HA.start(draw);
+</script>
+</body>
+</html>

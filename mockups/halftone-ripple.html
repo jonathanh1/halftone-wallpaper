@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Halftone Aurora — Ripple</title>
+<link rel="stylesheet" href="_kit-skin.css" />
+<link rel="stylesheet" href="_halftone.css" />
+</head>
+<body>
+<canvas id="cv" class="field" aria-label="Interactive halftone aurora field. Drag or hover to warp the dot matrix."></canvas>
+<div class="bar"><span class="name">Ripple</span><a class="back" href="index.html">← mockups</a></div>
+<div class="caption" id="cap"></div>
+<footer class="hf"><span class="status proposal">proposal</span><span id="fileName"></span></footer>
+<script src="_halftone.js"></script>
+<script>
+"use strict";
+const cv = document.getElementById("cv");
+const r = HA.make2D(cv);
+HA.chrome({
+  name: "Ripple",
+  body: "Canvas 2D · dense halftone grid over a three-source magenta/violet/royal aurora mesh anchored to the bottom. Dot radius carries the gradient; the top fades to pure black.",
+  hint: "drag or hover — the dot field warps and springs back",
+  file: "halftone-ripple.html",
+});
+const draw = (t, dt) => r.render(t, dt, { spacing: 11, rMax: 4.8, set: HA.FOCI, warp: true, glow: true, shift: null, freeze: HA.motionOff() });
+HA.trackPointer(cv, (x, y, vx, vy, kind) => r.impulseQueue(x, y, vx, vy, kind));
+HA.fit([cv]);
+addEventListener("resize", () => { HA.fit([cv]); r.render.rebuild(); if (HA.motionOff()) draw(4.2, 0.016); });
+HA.start(draw);
+</script>
+</body>
+</html>

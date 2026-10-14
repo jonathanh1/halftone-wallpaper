@@ -1,0 +1,94 @@
+/* Oh My GUI design-kit — shared skin layer.
+   Semantic slot names match tokens.stylex.ts; the [data-skin=anodized] block
+   is the same recipe component-kit-anodized.html aliases onto those slots. */
+:root, [data-skin=glass] {
+  --canvas: #080B0F; --surface-subtle: #0D1117; --surface: #121820;
+  --surface-raised: #19212B; --surface-pressed: #222C38;
+  --divider: #34404D; --control-border: #6F7E8D;
+  --ink: #F1F6F4; --secondary: #C1CBC8; --muted: #98A5A1; --disabled: #707B78;
+  --accent: #5ee0c5; --accent-strong: #7ec8e6; --on-accent: #040507;
+  --selection: rgba(94,224,197,0.20); --accent-fill: rgba(94,224,197,0.20);
+  --accent-fill-hover: rgba(94,224,197,0.28); --accent-fill-active: rgba(94,224,197,0.34);
+  --accent-boundary: rgba(94,224,197,0.30); --focus-ring: #5ee0c5;
+  --success: #5ee0c5; --warning: #ff9b5c; --danger: #ff5a5a; --info: #7ec8e6; --tool: #b89cff;
+  --selected-wash: rgba(94,224,197,0.08);
+  --hover-wash: rgba(255,255,255,0.04); --pressed-wash: rgba(255,255,255,0.08);
+  --depth-bevel: inset 0 1px 0 rgba(255,255,255,0.08);
+  --depth-bevel-strong: inset 0 1px 0 rgba(255,255,255,0.12);
+  --depth-resting: 0 8px 32px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.08);
+  --depth-raised: 12px 8px 60px rgba(0,0,0,0.42);
+  --depth-strong: 0 12px 40px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.12);
+  --depth-overlay: 0 24px 64px rgba(0,0,0,0.80);
+  --depth-live: 0 0 10px rgba(94,224,197,0.65);
+  --glass-surface: rgba(10,12,14,0.72); --glass-strong: rgba(10,12,14,0.82);
+  --glass-backdrop: blur(40px) saturate(1.8); --glass-border: rgba(255,255,255,0.06);
+  --glass-sheen: linear-gradient(120deg, rgba(255,255,255,0.12) 0%, transparent 32%);
+  --glass-grain-opacity: 0.032;
+  --well-fill: rgba(4,5,7,0.72);
+  --well-shadow: inset 0 2px 10px rgba(0,0,0,0.55), inset 0 -1px 0 rgba(255,255,255,0.04);
+  --card-shadow: none;
+  --card-selected-shadow: none;
+  --card-selected-fill: var(--surface);
+  --card-selected-boundary: var(--control-border);
+  --chip-shadow: none; --chip-shadow-press: none;
+  --chip-active-boundary: var(--accent-boundary); --chip-active-fill: var(--selected-wash);
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  --mono: ui-monospace, "SFMono-Regular", monospace;
+}
+[data-skin=anodized] {
+  --canvas: #16191D; --surface-subtle: #1E2228; --surface: #23272E;
+  --surface-raised: #2B3038; --surface-pressed: #1B1F25;
+  --divider: rgba(0,0,0,0.45); --control-border: #8A949E;
+  --ink: #E8ECEF; --secondary: #C6CDD4; --muted: #A6B0BA; --disabled: #87939A;
+  --accent: #7CF5C3; --accent-strong: #5CE8B0; --on-accent: #07130D;
+  --selection: rgba(124,245,195,0.22); --accent-fill: rgba(124,245,195,0.18);
+  --accent-fill-hover: rgba(124,245,195,0.26); --accent-fill-active: rgba(124,245,195,0.32);
+  --accent-boundary: rgba(124,245,195,0.35); --focus-ring: #7CF5C3;
+  --success: #7CF5C3; --warning: #FFC97A; --danger: #FF8A80; --info: #8FB4FF; --tool: #B8A6FF;
+  --selected-wash: rgba(124,245,195,0.08);
+  --hover-wash: rgba(255,255,255,0.06); --pressed-wash: rgba(255,255,255,0.08);
+  --depth-bevel: inset 1px 1px 0 rgba(255,255,255,0.06);
+  --depth-bevel-strong: inset 1px 1px 0 rgba(255,255,255,0.10);
+  --depth-resting:
+    0 0 0 1px rgba(0,0,0,0.40), 8px 8px 18px rgba(0,0,0,0.55),
+    -6px -6px 14px rgba(255,255,255,0.05), inset 1px 1px 0 rgba(255,255,255,0.06);
+  --depth-raised:
+    0 0 0 1px rgba(0,0,0,0.40), 14px 14px 30px rgba(0,0,0,0.55),
+    -8px -8px 20px rgba(255,255,255,0.05), inset 1px 1px 0 rgba(255,255,255,0.06);
+  --depth-strong:
+    0 0 0 1px rgba(0,0,0,0.40), 16px 16px 36px rgba(0,0,0,0.60),
+    -10px -10px 24px rgba(255,255,255,0.06), inset 1px 1px 0 rgba(255,255,255,0.08);
+  --depth-overlay: 0 24px 64px rgba(0,0,0,0.80);
+  --depth-live: 0 0 10px rgba(124,245,195,0.65);
+  --glass-surface: rgba(35,39,46,0.98); --glass-strong: rgba(27,31,37,0.98);
+  --glass-backdrop: none; --glass-border: rgba(255,255,255,0.06); --glass-sheen: none;
+  --glass-grain-opacity: 0.015;
+  --well-fill: #121418;
+  --well-shadow: inset 6px 6px 12px rgba(0,0,0,0.55), inset -4px -4px 10px rgba(255,255,255,0.04), 0 1px 0 rgba(255,255,255,0.04);
+  --card-shadow:
+    0 0 0 1px rgba(0,0,0,0.40), 6px 6px 14px rgba(0,0,0,0.55),
+    -4px -4px 10px rgba(255,255,255,0.05), inset 1px 1px 0 rgba(255,255,255,0.35);
+  --card-selected-shadow:
+    0 0 0 1px rgba(0,0,0,0.40), 8px 8px 18px rgba(0,0,0,0.55),
+    -5px -5px 12px rgba(255,255,255,0.06), 0 0 18px rgba(124,245,195,0.40),
+    inset 1px 1px 0 rgba(255,255,255,0.45);
+  --card-selected-fill: #262C33; --card-selected-boundary: rgba(124,245,195,0.35);
+  --chip-shadow:
+    0 0 0 1px rgba(0,0,0,0.40), 4px 4px 10px rgba(0,0,0,0.55),
+    -3px -3px 8px rgba(255,255,255,0.05), inset 1px 1px 0 rgba(255,255,255,0.07);
+  --chip-shadow-press: inset 6px 6px 12px rgba(0,0,0,0.55), inset -4px -4px 10px rgba(255,255,255,0.04);
+  --chip-active-boundary: rgba(124,245,195,0.65); --chip-active-fill: rgba(124,245,195,0.18);
+}
+
+/* Footer chips describe artifact roles, not contribution lifecycle or approval.
+   The review states and promotion criteria live in contribution-intake.html. */
+.status { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono);
+  font-size: 9.5px; letter-spacing: 0.12em; text-transform: uppercase; padding: 2px 8px;
+  border-radius: 5px; }
+.status::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.status.reference, .status.fixture-badge, .status.flow-map, .status.specimen, .status.snapshot, .status.inventory, .status.index {
+  background: var(--surface-raised); color: var(--muted); }
+.status.spec-reference { background: var(--accent-fill); color: var(--accent); }
+.status.proposal { background: var(--surface-raised); color: var(--warning); }
+.status.procedure { background: var(--surface-raised); color: var(--info); }
+.status.upstream { background: var(--surface-raised); color: var(--disabled); }
