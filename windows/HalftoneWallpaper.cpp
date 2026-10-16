@@ -299,7 +299,10 @@ static void evalDots(double t, double dt, bool freeze,
             * (1 - sstep(0.1, 0.5, (gH - d.by) / gH));
         if (pointerOn) {
             const double ox = px - gPointer.x, oy = py - gPointer.y;
-            I += 0.55 * exp(-(ox * ox + oy * oy) / (2 * 130 * 130)) * (gPointer.down ? 1 : 0.45);
+            // Halo = aura of the field: full strength wherever the aurora has
+            // any visible light, fades to zero into the starfield.
+            I += 0.55 * exp(-(ox * ox + oy * oy) / (2 * 130 * 130))
+                 * (gPointer.down ? 1 : 0.45) * sstep(0.02, 0.10, f.I);
         }
         I = clampd(I, 0, 1.25);
         const double r = RMAX * d.g * pow(min(I, 1.1), 0.78);
@@ -341,10 +344,13 @@ VSOut main(uint id : SV_VertexID) {
 
 // Pixel shader — direct port of the verified CPU mirror (.derived/refrender.mjs).
 static const char* PS_SRC = R"HLSL(
-Texture2D<float4>  starTex  : register(t0);   // r=a*cov, g=sp, b=ph  (css res)
+StructuredBuffer<float4> starPos : register(t0); // x,y,r,a (css px)
 Texture2D<float4>  glowTex  : register(t1);   // premult rgb, a=1     (cell grid)
 Texture2D<float>   grainTex : register(t2);   // 128² tile, byte/255
 StructuredBuffer<float4> dotA : register(t3); // x,y,r,haloR (css px)
+StructuredBuffer<uint>   starIdx : register(t5); // tile buckets (CSR)
+StructuredBuffer<uint>   starCell: register(t6); // cell -> start in starIdx
+StructuredBuffer<float4> starTw : register(t7);  // a, sp, ph, -
 StructuredBuffer<uint>   dotB : register(t4); // rgb8 | fringe<<24
 SamplerState samLin : register(s0);
 
@@ -368,9 +374,26 @@ float4 main(float4 pos : SV_Position) : SV_Target {
                             ((css.y - glowP.y) / glowP.x + 0.5) / glowP.w);
         col = glowTex.SampleLevel(samLin, guv, 0).rgb;
     } else {
-        float4 s = starTex.SampleLevel(samLin, css / float2(W, H), 0);
-        float tw = freeze ? 1.0 : (0.65 + 0.35 * sin(t * s.g + s.b));
-        col = float3(230, 233, 255) / 255.0 * s.r * tw;
+        // Stars: analytic coverage — gaussian footprint from the true center,
+        // not a baked texture, so a sub-pixel star stays a single soft glint
+        // at any dpr. Tile buckets (32 css px) limit the loop to ~1 star.
+        const float TILE = 32.0;
+        int tc = clamp((int)(css.x / TILE), 0, (int)ceil(W / TILE) - 1)
+               + clamp((int)(css.y / TILE), 0, (int)ceil(H / TILE) - 1)
+                 * (int)ceil(W / TILE);
+        uint lo = starCell[tc], hi = starCell[tc + 1];
+        float acc = 0.0; float4 twpar = float4(0, 1, 0, 0);
+        for (uint si = lo; si < hi; si++) {
+            uint k = starIdx[si];
+            float4 sp4 = starPos[k];
+            float2 d = css - sp4.xy;
+            float cov = exp(-dot(d, d) / (2.0 * sp4.z * sp4.z));
+            float a = sp4.w * cov;
+            if (a > acc) { acc = a; twpar = starTw[k]; }
+            acc = min(1.0, acc);
+        }
+        float tw = freeze ? 1.0 : (0.65 + 0.35 * sin(t * twpar.y + twpar.z));
+        col = float3(230, 233, 255) / 255.0 * acc * tw;
     }
 
     // dots: nearest cell center ±3 (7×7) — a warped dot can displace ±18 css px
@@ -426,7 +449,7 @@ float4 main(float4 pos : SV_Position) : SV_Target {
 // Debug shader: one input per channel, no cbuffer — a black channel names the
 // dead resource on hardware. Bound instead of PS_SRC when --raw is passed.
 static const char* PS_DBG = R"HLSL(
-Texture2D<float4>  starTex  : register(t0);
+StructuredBuffer<float4> starPos : register(t0);
 Texture2D<float4>  glowTex  : register(t1);
 Texture2D<float>   grainTex : register(t2);
 StructuredBuffer<float4> dotA : register(t3);
@@ -434,9 +457,12 @@ StructuredBuffer<uint>   dotB : register(t4);
 SamplerState samLin : register(s0);
 cbuffer Params : register(b0) { float4 wh; float4 grid; float4 glowP; float4 grainP; };
 float4 main(float4 pos : SV_Position) : SV_Target {
-    // constant magenta: if this shows, resources/binding were the issue;
-    // if still black, Draw/present is being discarded entirely.
-    return float4(1.0, 0.0, 1.0, 1.0);
+    // ptrmark: magenta ring where the app believes the cursor is —
+    // if the ring doesn't sit on the cursor, the feed coordinates are wrong.
+    float2 css = pos.xy / wh.z;
+    float d = distance(css, float2(wh.z, wh.w));   // wh.z/wh.w = pointer x,y
+    float ring = smoothstep(28.0, 24.0, d) * smoothstep(18.0, 22.0, d);
+    return float4(ring, ring * 0.2, ring, 1.0);
 }
 )HLSL";
 
@@ -458,8 +484,14 @@ static ID3D11RasterizerState* gRs = nullptr;
 static ID3D11Buffer* gDotB = nullptr;   // uint per dot
 static ID3D11ShaderResourceView* gDotASrv = nullptr;
 static ID3D11ShaderResourceView* gDotBSrv = nullptr;
-static ID3D11Texture2D* gStarTex = nullptr;
-static ID3D11ShaderResourceView* gStarSrv = nullptr;
+static ID3D11Buffer* gStarPos = nullptr;  // float4 x,y,sigma,a per star
+static ID3D11Buffer* gStarTw = nullptr;   // float4 a,sp,ph,- per star
+static ID3D11Buffer* gStarCell = nullptr; // uint cell -> start in starIdx (n+1)
+static ID3D11Buffer* gStarIdx = nullptr;  // uint star ids, CSR buckets
+static ID3D11ShaderResourceView* gStarPosSrv = nullptr;
+static ID3D11ShaderResourceView* gStarTwSrv = nullptr;
+static ID3D11ShaderResourceView* gStarCellSrv = nullptr;
+static ID3D11ShaderResourceView* gStarIdxSrv = nullptr;
 static ID3D11Texture2D* gGlowTex = nullptr;
 static ID3D11ShaderResourceView* gGlowSrv = nullptr;
 static ID3D11Texture2D* gGrainTex = nullptr;
@@ -517,41 +549,61 @@ static HRESULT makeSB(ID3D11Device* dev, UINT count, UINT stride,
     return dev->CreateShaderResourceView(*buf, &sd, srv);
 }
 
-// Bake the star layer: per css-pixel accumulated alpha + dominant star's twinkle
-// params (overlaps are rare; the dominant star's params drive the mix).
-static HRESULT buildStarTex() {
-    const int W = (int)ceil(gW), H = (int)ceil(gH);
-    std::vector<float> px((size_t)W * H * 4, 0.0f);
+// Stars as GPU data, not a baked texture: starPos + tw params + a 32px CSR
+// tile grid so the pixel shader shades each star analytically (exact gaussian
+// coverage — no texel quantization, no clusters at any dpr).
+static HRESULT buildStarData() {
+    const size_t n = gStars.size();
+    std::vector<float> pos(n * 4), tw(n * 4);
+    for (size_t i = 0; i < n; i++) {
+        const Star& s = gStars[i];
+        const float sig = 0.55f + s.r * 0.55f;   // ~1.3–2px glint
+        pos[i * 4 + 0] = s.x; pos[i * 4 + 1] = s.y;
+        pos[i * 4 + 2] = sig; pos[i * 4 + 3] = s.a;
+        tw[i * 4 + 0] = s.a; tw[i * 4 + 1] = s.sp; tw[i * 4 + 2] = s.ph;
+    }
+    HRESULT hr = makeSB(gDev, (UINT)n, 16, &gStarPos, &gStarPosSrv);
+    if (FAILED(hr)) return hr;
+    gCtx->UpdateSubresource(gStarPos, 0, nullptr, pos.data(), 0, 0);
+    hr = makeSB(gDev, (UINT)n, 16, &gStarTw, &gStarTwSrv);
+    if (FAILED(hr)) return hr;
+    gCtx->UpdateSubresource(gStarTw, 0, nullptr, tw.data(), 0, 0);
+
+    // Tile grid: 32 css px cells, CSR layout (cell -> [lo,hi) in starIdx).
+    const float TILE = 32.0f;
+    const int tcw = (int)ceil(gW / TILE), tch = (int)ceil(gH / TILE);
+    const int reach = 3;                          // ~96px: covers σ≤2.4 tail
+    std::vector<uint32_t> cellCount((size_t)tcw * tch + 1, 0);
     for (const Star& s : gStars) {
-        const int x0 = max(0, (int)floor(s.x - s.r - 1)), x1 = min(W - 1, (int)ceil(s.x + s.r + 1));
-        const int y0 = max(0, (int)floor(s.y - s.r - 1)), y1 = min(H - 1, (int)ceil(s.y + s.r + 1));
-        for (int y = y0; y <= y1; y++) for (int x = x0; x <= x1; x++) {
-            // 2×2 supersample: at dpr 1 a sub-pixel star would be one hard
-            // square; fractional coverage spreads it like Canvas `arc` AA.
-            float cov = 0.0f;
-            for (int sy = 0; sy < 2; sy++) for (int sx = 0; sx < 2; sx++) {
-                const float d = (float)hypot(x + 0.25 + 0.5 * sx - s.x,
-                                           y + 0.25 + 0.5 * sy - s.y);
-                cov += (float)clampd(s.r + 0.5 - d, 0.0, 1.0) * 0.25f;
-            }
-            if (cov <= 0) continue;
-            float* p = &px[((size_t)y * W + x) * 4];
-            const float add = s.a * cov;
-            if (add > p[0]) { p[1] = s.sp; p[2] = s.ph; }
-            p[0] = min(1.0f, p[0] + add);
+        const int cx0 = max(0, (int)((s.x - reach) / TILE));
+        const int cx1 = min(tcw - 1, (int)((s.x + reach) / TILE));
+        const int cy0 = max(0, (int)((s.y - reach) / TILE));
+        const int cy1 = min(tch - 1, (int)((s.y + reach) / TILE));
+        for (int cy = cy0; cy <= cy1; cy++) for (int cx = cx0; cx <= cx1; cx++)
+            cellCount[(size_t)cy * tcw + cx]++;
+    }
+    std::vector<uint32_t> cells(tcw * tch + 1, 0);
+    for (size_t i = 0; i < (size_t)tcw * tch; i++) cells[i + 1] = cells[i] + cellCount[i];
+    std::vector<uint32_t> fill((size_t)tcw * tch, 0);
+    std::vector<uint32_t> idx(cells[tcw * tch]);
+    for (size_t i = 0; i < n; i++) {
+        const Star& s = gStars[i];
+        const int cx0 = max(0, (int)((s.x - reach) / TILE));
+        const int cx1 = min(tcw - 1, (int)((s.x + reach) / TILE));
+        const int cy0 = max(0, (int)((s.y - reach) / TILE));
+        const int cy1 = min(tch - 1, (int)((s.y + reach) / TILE));
+        for (int cy = cy0; cy <= cy1; cy++) for (int cx = cx0; cx <= cx1; cx++) {
+            const int c = cy * tcw + cx;
+            idx[cells[c] + fill[c]++] = (uint32_t)i;
         }
     }
-    D3D11_TEXTURE2D_DESC td = {};
-    td.Width = W; td.Height = H; td.MipLevels = 1; td.ArraySize = 1;
-    td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    td.SampleDesc.Count = 1;
-    td.Usage = D3D11_USAGE_DEFAULT;
-    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    D3D11_SUBRESOURCE_DATA init = { px.data(), (UINT)(W * 8), 0 };
-    rls(gStarSrv); rls(gStarTex);
-    HRESULT hr = gDev->CreateTexture2D(&td, &init, &gStarTex);
+    hr = makeSB(gDev, (UINT)cells.size(), 4, &gStarCell, &gStarCellSrv);
     if (FAILED(hr)) return hr;
-    return gDev->CreateShaderResourceView(gStarTex, nullptr, &gStarSrv);
+    gCtx->UpdateSubresource(gStarCell, 0, nullptr, cells.data(), 0, 0);
+    hr = makeSB(gDev, (UINT)idx.size(), 4, &gStarIdx, &gStarIdxSrv);
+    if (FAILED(hr)) return hr;
+    gCtx->UpdateSubresource(gStarIdx, 0, nullptr, idx.data(), 0, 0);
+    return hr;
 }
 
 static HRESULT buildGlowTex() {
@@ -713,12 +765,12 @@ static HRESULT initView(HWND hwnd) {
     hr = makeSB(gDev, (UINT)gDots.size(), 4, &gDotB, &gDotBSrv);
     if (FAILED(hr)) { logLine("dotB SB %08lx", hr); return hr; }
     try {
-        hr = buildStarTex();
+        hr = buildStarData();
     } catch (...) {
-        logLine("buildStarTex threw (allocation)");
+        logLine("buildStarData threw (allocation)");
         return E_OUTOFMEMORY;
     }
-    if (FAILED(hr)) { logLine("starTex %08lx", hr); return hr; }
+    if (FAILED(hr)) { logLine("starData %08lx", hr); return hr; }
     hr = buildGlowTex();
     if (FAILED(hr)) { logLine("glowTex %08lx", hr); return hr; }
     return hr;
@@ -790,7 +842,12 @@ static void renderFrame() {
     D3D11_MAPPED_SUBRESOURCE ms;
     if (SUCCEEDED(gCtx->Map(gCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) {
         Params* p = (Params*)ms.pData;
-        p->wh[0] = (float)gW; p->wh[1] = (float)gH; p->wh[2] = (float)gDpr; p->wh[3] = (float)t;
+        p->wh[0] = (float)gW; p->wh[1] = (float)gH;
+        if (gRawMode) {                       // ptrmark: wh.z/w = pointer css xy
+            p->wh[2] = (float)gPointer.x; p->wh[3] = (float)gPointer.y;
+        } else {
+            p->wh[2] = (float)gDpr; p->wh[3] = (float)t;
+        }
         p->grid[0] = (float)SPACING; p->grid[1] = (float)gCols; p->grid[2] = (float)gRows;
         p->glow[0] = (float)GLOW_CELL; p->glow[1] = (float)gGlowY0;
         p->glow[2] = (float)gGlowW; p->glow[3] = (float)gGlowH;
@@ -809,8 +866,9 @@ static void renderFrame() {
     gCtx->VSSetShader(gVs, nullptr, 0);
     gCtx->PSSetShader(gPs, nullptr, 0);
     gCtx->PSSetConstantBuffers(0, 1, &gCb);
-    ID3D11ShaderResourceView* srvs[5] = { gStarSrv, gGlowSrv, gGrainSrv, gDotASrv, gDotBSrv };
-    gCtx->PSSetShaderResources(0, 5, srvs);
+    ID3D11ShaderResourceView* srvs[8] = { gStarPosSrv, gGlowSrv, gGrainSrv,
+        gDotASrv, gDotBSrv, gStarIdxSrv, gStarCellSrv, gStarTwSrv };
+    gCtx->PSSetShaderResources(0, 8, srvs);
     gCtx->PSSetSamplers(0, 1, &gSam);
     gCtx->IASetInputLayout(nullptr);           // SV_VertexID-only VS needs this bound
     gCtx->RSSetState(gRs);                       // CULL_NONE — fullscreen tri
@@ -836,7 +894,9 @@ static void renderFrame() {
 static void releaseView() {
     if (gCtx) gCtx->OMSetRenderTargets(0, nullptr, nullptr);
     rls(gRtv); rls(gSwap);
-    rls(gStarSrv); rls(gStarTex); rls(gGlowSrv); rls(gGlowTex);
+    rls(gStarPosSrv); rls(gStarTwSrv); rls(gStarCellSrv); rls(gStarIdxSrv);
+    rls(gStarPos); rls(gStarTw); rls(gStarCell); rls(gStarIdx);
+    rls(gGlowSrv); rls(gGlowTex);
     rls(gDotASrv); rls(gDotA); rls(gDotBSrv); rls(gDotB);
 }
 
@@ -1287,16 +1347,32 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int) {
             continue;                        // no swapchain → idle until embed
         }
 
+
+        const uint64_t now = GetTickCount64();
+        static uint64_t lastZorder = 0;
+        // Z-order guard: Explorer can spawn a WorkerW inside Progman *after*
+        // our embed (that's the desktop's own wallpaper surface — it lands
+        // above us and buries the field). Every ~2s, re-pin just under
+        // SHELLDLL_DefView so we stay above it.
+        if (now - lastZorder >= 2000) {
+            lastZorder = now;
+            HWND def = FindWindowExW(gHost, nullptr, L"SHELLDLL_DefView", nullptr);
+            if (def) SetWindowPos(gHwndView, def, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
         if (gFrozen) {
             if (gNeedsFrame) { renderFrame(); gNeedsFrame = false; }
             continue;
         }
-        const uint64_t now = GetTickCount64();
+
         if (!gInteractive && !gNoPointer && now - lastFeed >= 33) {
             POINT cp;
             if (GetCursorPos(&cp) && (cp.x != lastCp.x || cp.y != lastCp.y)) {
                 feedPointer((cp.x - gHostX) / gDpr, (cp.y - gHostY) / gDpr, false);
                 lastCp = cp;
+                if (gRawMode)
+                    logLine("ptr raw=(%ld,%ld) css=(%.0f,%.0f)", cp.x, cp.y,
+                        (cp.x - gHostX) / gDpr, (cp.y - gHostY) / gDpr);
             }
             lastFeed = now;
         }
