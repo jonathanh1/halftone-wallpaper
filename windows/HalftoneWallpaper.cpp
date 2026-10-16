@@ -412,6 +412,7 @@ float4 main(float4 pos : SV_Position) : SV_Target {
             if (a.w > 0) halo += rgb * saturate(a.w + 0.5 - dist);
         }
     }
+
     col += fringe;          // 'lighter'; survives × Π(1−cov) where dots don't cover
     col += halo * 0.1;      // bloom, additive over dots
 
@@ -419,6 +420,23 @@ float4 main(float4 pos : SV_Position) : SV_Target {
     int2 gi = (int2)pos.xy - int2((int)grainP.x, (int)grainP.y);
     col *= grainTex.Load(int3(gi & 127, 0));
     return float4(col, 1.0);
+}
+)HLSL";
+
+// Debug shader: one input per channel, no cbuffer — a black channel names the
+// dead resource on hardware. Bound instead of PS_SRC when --raw is passed.
+static const char* PS_DBG = R"HLSL(
+Texture2D<float4>  starTex  : register(t0);
+Texture2D<float4>  glowTex  : register(t1);
+Texture2D<float>   grainTex : register(t2);
+StructuredBuffer<float4> dotA : register(t3);
+StructuredBuffer<uint>   dotB : register(t4);
+SamplerState samLin : register(s0);
+cbuffer Params : register(b0) { float4 wh; float4 grid; float4 glowP; float4 grainP; };
+float4 main(float4 pos : SV_Position) : SV_Target {
+    // constant magenta: if this shows, resources/binding were the issue;
+    // if still black, Draw/present is being discarded entirely.
+    return float4(1.0, 0.0, 1.0, 1.0);
 }
 )HLSL";
 
@@ -431,9 +449,12 @@ static IDXGISwapChain* gSwap = nullptr;
 static ID3D11RenderTargetView* gRtv = nullptr;
 static ID3D11VertexShader* gVs = nullptr;
 static ID3D11PixelShader* gPs = nullptr;
+static bool gRawMode = false;
+static bool hasFlag(const wchar_t* cmd, const wchar_t* flag);   // defined near wWinMain
 static ID3D11SamplerState* gSam = nullptr;
 static ID3D11Buffer* gCb = nullptr;
 static ID3D11Buffer* gDotA = nullptr;   // float4 per dot
+static ID3D11RasterizerState* gRs = nullptr;
 static ID3D11Buffer* gDotB = nullptr;   // uint per dot
 static ID3D11ShaderResourceView* gDotASrv = nullptr;
 static ID3D11ShaderResourceView* gDotBSrv = nullptr;
@@ -505,8 +526,14 @@ static HRESULT buildStarTex() {
         const int x0 = max(0, (int)floor(s.x - s.r - 1)), x1 = min(W - 1, (int)ceil(s.x + s.r + 1));
         const int y0 = max(0, (int)floor(s.y - s.r - 1)), y1 = min(H - 1, (int)ceil(s.y + s.r + 1));
         for (int y = y0; y <= y1; y++) for (int x = x0; x <= x1; x++) {
-            const float d = (float)hypot(x + 0.5 - s.x, y + 0.5 - s.y);
-            const float cov = (float)clampd(s.r + 0.5 - d, 0.0, 1.0);
+            // 2×2 supersample: at dpr 1 a sub-pixel star would be one hard
+            // square; fractional coverage spreads it like Canvas `arc` AA.
+            float cov = 0.0f;
+            for (int sy = 0; sy < 2; sy++) for (int sx = 0; sx < 2; sx++) {
+                const float d = (float)hypot(x + 0.25 + 0.5 * sx - s.x,
+                                           y + 0.25 + 0.5 * sy - s.y);
+                cov += (float)clampd(s.r + 0.5 - d, 0.0, 1.0) * 0.25f;
+            }
             if (cov <= 0) continue;
             float* p = &px[((size_t)y * W + x) * 4];
             const float add = s.a * cov;
@@ -573,10 +600,36 @@ static HRESULT makeRtv() {
     return hr;
 }
 
+// D3D debug layer: validation messages surface in our log (remote runs have
+// no debugger attached, so the default OutputDebugString stream is lost).
+static void drainD3DDebug() {
+    static int tries = 0;
+    ID3D11InfoQueue* iq = nullptr;
+    if (!gDev || FAILED(gDev->QueryInterface(__uuidof(ID3D11InfoQueue), (void**)&iq)) || !iq) {
+        if (tries++ == 0) logLine("d3d11 debug queue unavailable");
+        return;
+    }
+    const UINT64 n = iq->GetNumStoredMessagesAllowedByRetrievalFilter();
+    if (tries++ == 0) logLine("d3d11 debug queue live, %llu msgs", (unsigned long long)n);
+    for (UINT64 i = 0; i < n; i++) {
+        SIZE_T len = 0;
+        iq->GetMessageW(i, nullptr, &len);
+        std::vector<char> buf(len);
+        auto* msg = (D3D11_MESSAGE*)buf.data();
+        if (SUCCEEDED(iq->GetMessageW(i, msg, &len)))
+            logLine("d3d11 [%d] %s", (int)msg->Severity, msg->pDescription);
+    }
+    iq->ClearStoredMessages();
+    iq->Release();
+}
+
 // Device-level init — once per process: device, shaders, sampler, cbuffer, grain.
 static HRESULT initDevice() {
     HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-        0, nullptr, 0, D3D11_SDK_VERSION, &gDev, nullptr, &gCtx);
+        D3D11_CREATE_DEVICE_DEBUG, nullptr, 0, D3D11_SDK_VERSION, &gDev, nullptr, &gCtx);
+    if (FAILED(hr))                        // debug layer absent on some SKUs
+        hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+            0, nullptr, 0, D3D11_SDK_VERSION, &gDev, nullptr, &gCtx);
     if (FAILED(hr)) {   // WARP fallback: wallpaper must run everywhere
         hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
             0, nullptr, 0, D3D11_SDK_VERSION, &gDev, nullptr, &gCtx);
@@ -590,8 +643,11 @@ static HRESULT initDevice() {
     vsb->Release();
     if (FAILED(hr)) { logLine("VS create %08lx", hr); return hr; }
 
+    logLine("VS=%p FL=%04x", gVs, gDev->GetFeatureLevel());
+    gRawMode = hasFlag(GetCommandLineW(), L"--raw");
+    if (gRawMode) logLine("--raw: debug pixel shader bound");
     ID3DBlob* psb = nullptr;
-    hr = compileShader(PS_SRC, "main", "ps_5_0", &psb);
+    hr = compileShader(gRawMode ? PS_DBG : PS_SRC, "main", "ps_5_0", &psb);
     if (FAILED(hr)) { logLine("PS compile %08lx", hr); return hr; }
     hr = gDev->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &gPs);
     psb->Release();
@@ -602,6 +658,13 @@ static HRESULT initDevice() {
     sam.AddressU = sam.AddressV = sam.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
     hr = gDev->CreateSamplerState(&sam, &gSam);
     if (FAILED(hr)) { logLine("Sampler %08lx", hr); return hr; }
+    D3D11_RASTERIZER_DESC rd = {};
+    rd.FillMode = D3D11_FILL_SOLID;
+    rd.CullMode = D3D11_CULL_NONE;            // fullscreen tri: winding undefined
+    rd.DepthClipEnable = TRUE;
+    hr = gDev->CreateRasterizerState(&rd, &gRs);
+    if (FAILED(hr)) { logLine("Rasterizer %08lx", hr); return hr; }
+
 
     D3D11_BUFFER_DESC cd = {};
     cd.ByteWidth = sizeof(Params);
@@ -708,6 +771,8 @@ static void recomputeFreeze() {
 static void logFramePixels();   // defined after measureHost
 
 static void renderFrame() {
+    static int frameNo = 0;
+    frameNo++;
     const double t = curT();
     static double last = 0;
     const double dlt = last ? nowSec() - last : 0;
@@ -727,7 +792,6 @@ static void renderFrame() {
         Params* p = (Params*)ms.pData;
         p->wh[0] = (float)gW; p->wh[1] = (float)gH; p->wh[2] = (float)gDpr; p->wh[3] = (float)t;
         p->grid[0] = (float)SPACING; p->grid[1] = (float)gCols; p->grid[2] = (float)gRows;
-        p->grid[3] = gFrozen ? 1.0f : 0.0f;
         p->glow[0] = (float)GLOW_CELL; p->glow[1] = (float)gGlowY0;
         p->glow[2] = (float)gGlowW; p->glow[3] = (float)gGlowH;
         // drawGrain offset: f = freeze?0:floor(t*24); ox=h11(f+.5)*128, oy=h11(f+77.7)*128
@@ -748,19 +812,22 @@ static void renderFrame() {
     ID3D11ShaderResourceView* srvs[5] = { gStarSrv, gGlowSrv, gGrainSrv, gDotASrv, gDotBSrv };
     gCtx->PSSetShaderResources(0, 5, srvs);
     gCtx->PSSetSamplers(0, 1, &gSam);
+    gCtx->IASetInputLayout(nullptr);           // SV_VertexID-only VS needs this bound
+    gCtx->RSSetState(gRs);                       // CULL_NONE — fullscreen tri
     gCtx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     gCtx->Draw(3, 0);
+    // FLIP_DISCARD discards backbuffer contents on Present — sample after Draw,
+    // before Present.
+    if (frameNo == 2 || frameNo % 60 == 0) logFramePixels();
     const HRESULT phr = gSwap->Present(1, 0);
     if (phr == DXGI_ERROR_DEVICE_REMOVED || phr == DXGI_ERROR_DEVICE_RESET) {
         logLine("Present device lost %08lx -> quit", phr);
         gQuitting = true;
     }
-    static int frameNo = 0;
-    if ((++frameNo % 60) == 0 || frameNo == 2) {
+    drainD3DDebug();                       // surface validation errors in the log
+    if (frameNo == 2 || frameNo % 60 == 0)
         logLine("frame %d present=%08lx view=%p vis=%d", frameNo, phr,
             gHwndView, gHwndView ? (int)IsWindowVisible(gHwndView) : -1);
-        logFramePixels();
-    }
 }
 
 // Release everything tied to a specific swapchain/window so a view can be
@@ -798,12 +865,10 @@ static void measureHost() {
         gDotBufB.assign(gDots.size(), 0);
     }
 }
-// Readback diagnostic: samples 3 backbuffer pixels after Present so the log
-// proves what the GPU actually drew vs what the compositor shows. Beta-only.
 static void logFramePixels() {
     if (!gSwap) return;
     ID3D11Texture2D* bb = nullptr;
-    if (FAILED(gSwap->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb))) return;
+    if (FAILED(gSwap->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb))) { logLine("pxdiag: GetBuffer fail"); return; }
     D3D11_TEXTURE2D_DESC bd;
     bb->GetDesc(&bd);
     ID3D11Texture2D* st = nullptr;
@@ -811,23 +876,25 @@ static void logFramePixels() {
     bd.BindFlags = 0;
     bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     bd.MiscFlags = 0;
-    if (FAILED(gDev->CreateTexture2D(&bd, nullptr, &st))) { bb->Release(); return; }
+    if (FAILED(gDev->CreateTexture2D(&bd, nullptr, &st))) { bb->Release(); logLine("pxdiag: staging fail"); return; }
     gCtx->CopyResource(st, bb);
     bb->Release();
     D3D11_MAPPED_SUBRESOURCE m;
-    if (FAILED(gCtx->Map(st, 0, D3D11_MAP_READ, 0, &m))) { st->Release(); return; }
+    if (FAILED(gCtx->Map(st, 0, D3D11_MAP_READ, 0, &m))) { st->Release(); logLine("pxdiag: map fail"); return; }
     const uint8_t* px = (const uint8_t*)m.pData;
     const UINT pitch = m.RowPitch;
     const int W = (int)bd.Width, H = (int)bd.Height;
-    uint32_t c[3] = {};
-    for (int s = 0; s < 3; s++) {
-        const int x = W * (s + 1) / 4, y = H * (s + 1) / 4;
-        const uint8_t* p = px + (size_t)y * pitch + x * 4;
-        c[s] = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16);
+    // 5 samples down the center column: sky → glow band → dot band → bottom edge
+    const int ys[5] = { H / 8, H / 3, H * 2 / 3, H * 5 / 6, H - 20 };
+    char buf[256]; int off = 0;
+    for (int s = 0; s < 5; s++) {
+        const uint8_t* p = px + (size_t)ys[s] * pitch + (W / 2) * 4;
+        off += snprintf(buf + off, sizeof buf - off, " y%d=#%02x%02x%02x%02x",
+            ys[s], p[2], p[1], p[0], p[3]);
     }
     gCtx->Unmap(st, 0);
     st->Release();
-    logLine("frame px @%dx%d: #%06x #%06x #%06x", W, H, c[0], c[1], c[2]);
+    logLine("frame px %dx%d center-col:%s", W, H, buf);
 }
 
 
@@ -868,33 +935,35 @@ static DesktopLayer findDesktopLayers() {
         GetClassNameW(top, c, 16);
         const bool isWorker = wcscmp(c, L"WorkerW") == 0;
         const bool hasIcons = FindWindowExW(top, nullptr, L"SHELLDLL_DefView", nullptr) != nullptr;
-        if (isWorker && !hasIcons && !l->wallpaper) l->wallpaper = top;
+        // Skip phantom WorkerWs — Win11 keeps tiny hidden ones (action center
+        // etc.); the wallpaper layer spans the virtual screen.
+        RECT r; GetWindowRect(top, &r);
+        const bool big = (r.right - r.left) > 800 && (r.bottom - r.top) > 600;
+        logClass(top, hasIcons ? "enum:iconsWW" : "enum:WW");
         if (isWorker && hasIcons && !l->iconsWorker) l->iconsWorker = top;
+        if (isWorker && !hasIcons && big && !l->wallpaper) l->wallpaper = top;
         return TRUE;
     }, reinterpret_cast<LPARAM>(&l));
-    logClass(l.progman, "host:progman");
-    logClass(l.wallpaper, "host:wallpaperWW");
-    logClass(l.iconsWorker, "host:iconsWW");
     return l;
 }
-
-// Candidate hosts, best first. Returns true when a view window is created and
-// its swapchain initialized under that host; the caller retries later on false.
+// Embed under a host as WS_CHILD *below* SHELLDLL_DefView — icons stay on
+// top, wallpaper shows through our gaps. Works on Win10 and 24H2 layouts.
 static bool tryEmbedOn(HWND host, const char* tag) {
     if (!host) return false;
     gHost = host;
     measureHost();
     if (gPhysW <= 0 || gPhysH <= 0) { logLine("embed[%s]: zero-size host", tag); return false; }
     gHwndView = CreateWindowExW(WS_EX_NOACTIVATE, L"HWView", L"Halftone Wallpaper",
-        WS_POPUP, 0, 0, gPhysW, gPhysH, nullptr, nullptr,
+        WS_POPUP | WS_VISIBLE, 0, 0, gPhysW, gPhysH, nullptr, nullptr,
         GetModuleHandleW(nullptr), nullptr);
-    if (!gHwndView) { logLine("embed[%s]: CreateWindowEx %lu", tag, GetLastError()); return false; }
+    HWND defView = FindWindowExW(host, nullptr, L"SHELLDLL_DefView", nullptr);
     // Lively recipe: create as popup, then adopt into the host at bottom.
     if (!SetParent(gHwndView, host)) { logLine("embed[%s]: SetParent %lu", tag, GetLastError()); goto fail; }
     SetWindowLongPtrW(gHwndView, GWL_STYLE,
-        (GetWindowLongPtrW(gHwndView, GWL_STYLE) & ~WS_POPUP) | WS_CHILD);
-    SetWindowPos(gHwndView, HWND_BOTTOM, 0, 0, 0, 0,
-        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED);
+        (GetWindowLongPtrW(gHwndView, GWL_STYLE) & ~WS_POPUP) | WS_CHILD | WS_VISIBLE);
+    SetWindowPos(gHwndView, defView ? defView : HWND_BOTTOM,
+        0, 0, gPhysW, gPhysH,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED);
     if (FAILED(initView(gHwndView))) goto fail;
     logLine("embedded [%s] host=%p view=%p %dx%d", tag, gHost, gHwndView, gPhysW, gPhysH);
     gViewDead = false;
@@ -904,6 +973,35 @@ fail:
     DestroyWindow(gHwndView); gHwndView = nullptr; gHost = nullptr;
     return false;
 }
+
+// Win11 24H2: DWM drops flip-model presents on WS_CHILD swapchains inside
+// foreign-process hosts (Progman/WorkerW). What composes: a TOP-LEVEL window
+// parked at HWND_BOTTOM — the desktop paints it under Progman (= under the
+// icons), which is exactly the layer we need.
+static bool tryEmbedTop() {
+    measureHost();                           // gHost=null → virtual-screen metrics
+    if (gPhysW <= 0 || gPhysH <= 0) { logLine("embed: zero virtual screen"); return false; }
+    gHwndView = CreateWindowExW(
+        WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,   // invisible to Alt-Tab/taskbar
+        L"HWView", L"Halftone Wallpaper",
+        WS_POPUP | WS_VISIBLE,
+        gVsX, gVsY, gPhysW, gPhysH, nullptr, nullptr,
+        GetModuleHandleW(nullptr), nullptr);
+    if (!gHwndView) { logLine("embed: CreateWindowEx %lu", GetLastError()); return false; }
+    // Pin below everything else; DWM keeps it above the static wallpaper.
+    SetWindowPos(gHwndView, HWND_BOTTOM, gVsX, gVsY, gPhysW, gPhysH,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED);
+    logClass(gHwndView, "view");
+    if (FAILED(initView(gHwndView))) goto fail;
+    logLine("embedded [toplevel] view=%p %dx%d", gHwndView, gPhysW, gPhysH);
+    gViewDead = false;
+    gNeedsFrame = true;
+    return true;
+fail:
+    DestroyWindow(gHwndView); gHwndView = nullptr;
+    return false;
+}
+
 
 static bool embedView() {
     releaseView();                           // drop stale swapchain objects first
@@ -921,11 +1019,14 @@ static bool embedView() {
         gViewDead = false; gNeedsFrame = true;
         return true;
     }
+    // Order: Progman child below DefView (icons preserved) → wallpaper WorkerW
+    // → icon WorkerW → top-level HWND_BOTTOM (last resort: covers some builds'
+    // icon layer, which is why it isn't first).
     const DesktopLayer l = findDesktopLayers();
-    // wallpaper WorkerW → Progman → icon-layer WorkerW (last resort, below icons)
-    if (tryEmbedOn(l.wallpaper, "wallpaperWW")) return true;
     if (tryEmbedOn(l.progman, "progman")) return true;
+    if (tryEmbedOn(l.wallpaper, "wallpaperWW")) return true;
     if (tryEmbedOn(l.iconsWorker, "iconsWW")) return true;
+    if (tryEmbedTop()) return true;
     logLine("embed: no usable host (all candidates failed)");
     return false;
 }
