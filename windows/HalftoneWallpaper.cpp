@@ -27,6 +27,7 @@
 #include <windows.h>
 #include <pbt.h>
 #include <d3d11.h>
+#include <dxgi1_2.h>
 #include <d3dcompiler.h>
 #include <dxgi.h>
 #include <shellapi.h>
@@ -37,6 +38,7 @@
 #include <cstring>
 #include <cstdarg>
 #include <vector>
+#include <climits>
 #include <algorithm>
 
 using std::min;
@@ -84,7 +86,7 @@ static LONG WINAPI crashFilter(EXCEPTION_POINTERS* ep) {
 // ============================================================================
 struct RGB { double r, g, b; };
 static const RGB PAL_MAGENTA{255, 47, 168}, PAL_VIOLET{139, 77, 255},
-                 PAL_ROYAL{59, 91, 255}, PAL_INDIGO{79, 70, 229};
+                 PAL_ROYAL{59, 91, 255};   // JS also defines PAL.indigo; no focus uses it
 struct FocusDef { double fx, y, r; RGB c; double ph, sp, ax; };
 static const FocusDef FOCI[] = {
     {0.14, -0.04, 0.36, PAL_MAGENTA, 0.0, 0.21, 0.055},
@@ -188,6 +190,14 @@ struct Star { float x, y, r, a, ph, sp; };
 static double gW = 0, gH = 0, gAspect = 1, gDpr = 1;   // css size of virtual desktop
 static int gPhysW = 0, gPhysH = 0;                     // physical swapchain px
 static int gVsX = 0, gVsY = 0;                     // virtual-screen origin (physical)
+static HWND gHwndMsg = nullptr;          // persistent hidden top-level (tray/power/display)
+static HWND gHwndView = nullptr;         // WS_CHILD on WorkerW — disposable, re-embedded
+static HWND gHost = nullptr;
+static bool gViewDead = true;            // needs (re-)embed
+static bool gQuitting = false;
+static uint64_t gDeadAt = 0;
+static UINT gTaskbarCreatedMsg = 0;
+static int gHostX = 0, gHostY = 0;       // host client rect origin in screen coords
 static int gCols = 0, gRows = 0;
 static std::vector<Dot> gDots;
 static std::vector<Star> gStars;
@@ -236,7 +246,7 @@ static void buildWorld() {
             gDots.push_back(d);
         }
     }
-    gRows = (int)(gDots.size() / gCols);
+    gRows = gCols > 0 ? (int)(gDots.size() / gCols) : 0;
     const int n = (int)(gW * gH / 4500 + 0.5);
     for (int s = 0; s < n; s++) {
         const double m = hash2(s + 0.5, s * 1.3);
@@ -353,46 +363,51 @@ float4 main(float4 pos : SV_Position) : SV_Target {
         col = float3(230, 233, 255) / 255.0 * s.r * tw;
     }
 
-    // dots: nearest cell center ±1 (3×3), painter order = linear index
+    // dots: nearest cell center ±3 (7×7) — a warped dot can displace ±18 css px
+    // (>1.5 cells) and its halo reaches ~10px past that; 3×3 loses it. No forced
+    // unroll: 49 iterations stay in local arrays instead of registers.
     int jr = (int)round((H + spacing * 0.5 - css.y) / spacing);
     int ir = (int)round((css.x - spacing * 0.5) / spacing);
     const int cols = (int)grid.y, rows = (int)grid.z;
-    float covs[9]; float4 pa[9]; uint pb[9];
     float un = 1.0;
-    [unroll] for (int dj = -1; dj <= 1; dj++) {
+    for (int dj = -3; dj <= 3; dj++) {
         int j = jr + dj;
-        [unroll] for (int di = -1; di <= 1; di++) {
+        if (j < 0 || j >= rows) continue;
+        for (int di = -3; di <= 3; di++) {
             int i = ir + di;
-            int k = (dj + 1) * 3 + (di + 1);
-            int idx = j * cols + i;
-            float4 a = (j < 0 || j >= rows || i < 0 || i >= cols) ? float4(0, 0, 0, 0) : dotA[idx];
-            pa[k] = a; pb[k] = a.z > 0 ? dotB[idx] : 0u;
-            covs[k] = a.z > 0 ? saturate(a.z + 0.5 - distance(css, a.xy)) : 0;
-            un *= 1.0 - covs[k];
+            if (i < 0 || i >= cols) continue;
+            float4 a = dotA[j * cols + i];
+            un *= 1.0 - (a.z > 0 ? saturate(a.z + 0.5 - distance(css, a.xy)) : 0);
         }
     }
     float3 fringe = 0, halo = 0;
-    [unroll] for (int k2 = 0; k2 < 9; k2++) {
-        float4 a = pa[k2];
-        if (a.z <= 0) continue;
-        float dist = distance(css, a.xy);
-        float3 rgb = float3(pb[k2] & 255u, (pb[k2] >> 8) & 255u, (pb[k2] >> 16) & 255u) / 255.0;
-        if (pb[k2] & 0x01000000u) {
-            float crv = saturate(a.z + 0.5 - distance(css, a.xy + float2(0.8, 0))) * un;
-            float cbv = saturate(a.z + 0.5 - distance(css, a.xy - float2(0.8, 0))) * un;
-            fringe += (float3(255, 40, 110) * crv + float3(40, 140, 255) * cbv) * 0.75 / 255.0;
-        }
-        col = lerp(col, rgb, covs[k2]);
-        if (a.w > 0) {
-            halo += rgb * saturate(a.w + 0.5 - dist);
+    for (int dj2 = -3; dj2 <= 3; dj2++) {
+        int j2 = jr + dj2;
+        if (j2 < 0 || j2 >= rows) continue;
+        for (int di2 = -3; di2 <= 3; di2++) {
+            int i2 = ir + di2;
+            if (i2 < 0 || i2 >= cols) continue;
+            int idx2 = j2 * cols + i2;
+            float4 a = dotA[idx2];
+            if (a.z <= 0) continue;
+            float dist = distance(css, a.xy);
+            uint pb = dotB[idx2];
+            float3 rgb = float3(pb & 255u, (pb >> 8) & 255u, (pb >> 16) & 255u) / 255.0;
+            if (pb & 0x01000000u) {
+                float crv = saturate(a.z + 0.5 - distance(css, a.xy + float2(0.8, 0))) * un;
+                float cbv = saturate(a.z + 0.5 - distance(css, a.xy - float2(0.8, 0))) * un;
+                fringe += (float3(255, 40, 110) * crv + float3(40, 140, 255) * cbv) * 0.75 / 255.0;
+            }
+            col = lerp(col, rgb, saturate(a.z + 0.5 - dist));
+            if (a.w > 0) halo += rgb * saturate(a.w + 0.5 - dist);
         }
     }
     col += fringe;          // 'lighter'; survives × Π(1−cov) where dots don't cover
     col += halo * 0.1;      // bloom, additive over dots
 
-    // grain multiply (physical px + animated offset, exact JS tile)
-    uint2 gp = ((uint2)pos.xy + uint2((uint)grainP.x, (uint)grainP.y)) & 127u;
-    col *= grainTex.Load(int3((int2)gp, 0));
+    // grain multiply (physical px − animated offset, exact JS tile)
+    int2 gi = (int2)pos.xy - int2((int)grainP.x, (int)grainP.y);
+    col *= grainTex.Load(int3(gi & 127, 0));
     return float4(col, 1.0);
 }
 )HLSL";
@@ -535,57 +550,48 @@ static HRESULT buildGrainTex() {
     return gDev->CreateShaderResourceView(gGrainTex, nullptr, &gGrainSrv);
 }
 
-static HRESULT createSwapChainResources() {
+// Unbind before ResizeBuffers — a bound RTV holds the backbuffer and makes
+// ResizeBuffers fail with DXGI_ERROR_INVALID_CALL.
+static HRESULT makeRtv() {
     rls(gRtv);
-    HRESULT hr = gSwap->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, 0);
-    if (FAILED(hr)) return hr;
     ID3D11Texture2D* bb = nullptr;
-    hr = gSwap->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb);
-    if (FAILED(hr)) return hr;
+    HRESULT hr = gSwap->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb);
+    if (FAILED(hr)) { logLine("GetBuffer %08lx", hr); return hr; }
     hr = gDev->CreateRenderTargetView(bb, nullptr, &gRtv);
     bb->Release();
+    if (FAILED(hr)) logLine("CreateRenderTargetView %08lx", hr);
     return hr;
 }
 
-static HRESULT initD3D(HWND hwnd) {
-    DXGI_SWAP_CHAIN_DESC sd = {};
-    sd.BufferDesc.Width = gPhysW; sd.BufferDesc.Height = gPhysH;
-    sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    sd.BufferCount = 2;
-    sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    sd.OutputWindow = hwnd;
-    sd.SampleDesc.Count = 1;
-    sd.Windowed = TRUE;
-    HRESULT hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-        0, nullptr, 0, D3D11_SDK_VERSION, &sd, &gSwap, &gDev, nullptr, &gCtx);
+// Device-level init — once per process: device, shaders, sampler, cbuffer, grain.
+static HRESULT initDevice() {
+    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+        0, nullptr, 0, D3D11_SDK_VERSION, &gDev, nullptr, &gCtx);
     if (FAILED(hr)) {   // WARP fallback: wallpaper must run everywhere
-        hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
-            0, nullptr, 0, D3D11_SDK_VERSION, &sd, &gSwap, &gDev, nullptr, &gCtx);
+        hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+            0, nullptr, 0, D3D11_SDK_VERSION, &gDev, nullptr, &gCtx);
     }
-    if (FAILED(hr)) return hr;
-    hr = createSwapChainResources();
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) { logLine("CreateDevice %08lx", hr); return hr; }
 
     ID3DBlob* vsb = nullptr;
     hr = compileShader(VS_SRC, "main", "vs_5_0", &vsb);
     if (FAILED(hr)) return hr;
     hr = gDev->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &gVs);
     vsb->Release();
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) { logLine("VS create %08lx", hr); return hr; }
 
     ID3DBlob* psb = nullptr;
     hr = compileShader(PS_SRC, "main", "ps_5_0", &psb);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) { logLine("PS compile %08lx", hr); return hr; }
     hr = gDev->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &gPs);
     psb->Release();
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) { logLine("PS create %08lx", hr); return hr; }
 
     D3D11_SAMPLER_DESC sam = {};
     sam.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
     sam.AddressU = sam.AddressV = sam.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
     hr = gDev->CreateSamplerState(&sam, &gSam);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) { logLine("Sampler %08lx", hr); return hr; }
 
     D3D11_BUFFER_DESC cd = {};
     cd.ByteWidth = sizeof(Params);
@@ -593,17 +599,56 @@ static HRESULT initD3D(HWND hwnd) {
     cd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     cd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     hr = gDev->CreateBuffer(&cd, nullptr, &gCb);
-    if (FAILED(hr)) return hr;
-
-    hr = makeSB(gDev, (UINT)gDots.size(), 16, &gDotA, &gDotASrv);
-    if (FAILED(hr)) return hr;
-    hr = makeSB(gDev, (UINT)gDots.size(), 4, &gDotB, &gDotBSrv);
-    if (FAILED(hr)) return hr;
-    hr = buildStarTex();
-    if (FAILED(hr)) return hr;
-    hr = buildGlowTex();
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) { logLine("CBuffer %08lx", hr); return hr; }
     return buildGrainTex();
+}
+
+// View-level init — (re)created for each host window / display size.
+static HRESULT initView(HWND hwnd) {
+    IDXGIDevice* dxgiDev = nullptr;
+    HRESULT hr = gDev->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgiDev);
+    if (FAILED(hr)) { logLine("QI IDXGIDevice %08lx", hr); return hr; }
+    IDXGIAdapter* adp = nullptr;
+    hr = dxgiDev->GetAdapter(&adp);
+    dxgiDev->Release();
+    if (FAILED(hr)) { logLine("GetAdapter %08lx", hr); return hr; }
+    IDXGIFactory2* fac = nullptr;
+    hr = adp->GetParent(__uuidof(IDXGIFactory2), (void**)&fac);
+    adp->Release();
+    if (FAILED(hr)) { logLine("GetParent factory %08lx", hr); return hr; }
+
+    DXGI_SWAP_CHAIN_DESC1 sd = {};
+    sd.Width = gPhysW; sd.Height = gPhysH;
+    sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    sd.BufferCount = 2;
+    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    sd.SampleDesc.Count = 1;
+    sd.Scaling = DXGI_SCALING_STRETCH;
+    DXGI_SWAP_CHAIN_FULLSCREEN_DESC fs = {};
+    fs.Windowed = TRUE;
+    IDXGISwapChain1* sc = nullptr;
+    hr = fac->CreateSwapChainForHwnd(gDev, hwnd, &sd, &fs, nullptr, &sc);
+    if (SUCCEEDED(hr)) hr = sc->QueryInterface(__uuidof(IDXGISwapChain), (void**)&gSwap);
+    if (sc) sc->Release();
+    fac->Release();
+    if (FAILED(hr)) { logLine("CreateSwapChainForHwnd %08lx", hr); return hr; }
+    hr = makeRtv();
+    if (FAILED(hr)) return hr;
+    hr = makeSB(gDev, (UINT)gDots.size(), 16, &gDotA, &gDotASrv);
+    if (FAILED(hr)) { logLine("dotA SB %08lx", hr); return hr; }
+    hr = makeSB(gDev, (UINT)gDots.size(), 4, &gDotB, &gDotBSrv);
+    if (FAILED(hr)) { logLine("dotB SB %08lx", hr); return hr; }
+    try {
+        hr = buildStarTex();
+    } catch (...) {
+        logLine("buildStarTex threw (allocation)");
+        return E_OUTOFMEMORY;
+    }
+    if (FAILED(hr)) { logLine("starTex %08lx", hr); return hr; }
+    hr = buildGlowTex();
+    if (FAILED(hr)) { logLine("glowTex %08lx", hr); return hr; }
+    return hr;
 }
 
 static std::vector<uint8_t> gGlowPx;
@@ -627,7 +672,6 @@ static void updateGlowTex(double t, const std::vector<Foci>& foci) {
 // ============================================================================
 // App state
 // ============================================================================
-static HWND gHwnd = nullptr;
 static NOTIFYICONDATAW gNid = {};
 static bool gStill = false, gNoPointer = false, gInteractive = false;
 static bool gFrozen = false;              // effective freeze (still|battery|display off)
@@ -654,8 +698,10 @@ static void recomputeFreeze() {
 static void renderFrame() {
     const double t = curT();
     static double last = 0;
-    const double dt = min(0.033, last ? nowSec() - last : 0.016);
+    const double dlt = last ? nowSec() - last : 0;
+    const double dt = min(0.033, dlt > 0 ? dlt : 0.016);   // JS: (now-last)/1000 || .016
     last = nowSec();
+
 
     fociAt(t, gFociSet, gFociN, gAspect, gFoci);
     evalDots(t, dt, gFrozen, gDotBufA, gDotBufB, gFoci);
@@ -692,31 +738,89 @@ static void renderFrame() {
     gCtx->PSSetSamplers(0, 1, &gSam);
     gCtx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     gCtx->Draw(3, 0);
-    gSwap->Present(1, 0);
+    const HRESULT phr = gSwap->Present(1, 0);
+    if (phr == DXGI_ERROR_DEVICE_REMOVED || phr == DXGI_ERROR_DEVICE_RESET) {
+        logLine("Present device lost %08lx -> quit", phr);
+        gQuitting = true;
+    }
 }
 
-// Rebuild after display/DPI change: resize the window + swapchain + world.
-static void relayout() {
-    gVsX = GetSystemMetrics(SM_XVIRTUALSCREEN); gVsY = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    const int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN), vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-    if (vw <= 0 || vh <= 0) return;
-    SetWindowPos(gHwnd, nullptr, gVsX, gVsY, vw, vh, SWP_NOZORDER | SWP_NOACTIVATE);
-    gDpr = GetDpiForSystem() / 96.0;
-    gPhysW = vw; gPhysH = vh;
-    gW = vw / gDpr; gH = vh / gDpr; gAspect = gW / gH;
+// Release everything tied to a specific swapchain/window so a view can be
+// re-embedded on a new host without leaking or double-binding.
+static HWND findDesktopHost();
+
+static void releaseView() {
+    if (gCtx) gCtx->OMSetRenderTargets(0, nullptr, nullptr);
+    rls(gRtv); rls(gSwap);
+    rls(gStarSrv); rls(gStarTex); rls(gGlowSrv); rls(gGlowTex);
+    rls(gDotASrv); rls(gDotA); rls(gDotBSrv); rls(gDotB);
+}
+
+// Measure the current host's client rect in screen coords and rebuild world
+// metrics (dpr/css dims/foci) if it changed.
+static void measureHost() {
+    RECT rc = { 0, 0, gPhysW, gPhysH };
+    POINT org = { 0, 0 };
+    if (gHost) {
+        GetClientRect(gHost, &rc);
+        ClientToScreen(gHost, &org);          // host client origin in screen px
+    }
+    gHostX = org.x; gHostY = org.y;
+    const int cw = rc.right - rc.left, ch = rc.bottom - rc.top;
+    if (cw <= 0 || ch <= 0) return;
+    gDpr = (gHost ? GetDpiForWindow(gHost) : GetDpiForSystem()) / 96.0;
+    if (gDpr <= 0) gDpr = 1;
+    gPhysW = cw; gPhysH = ch;
+    gW = cw / gDpr; gH = ch / gDpr; gAspect = gW / gH;
     gFociSet = gAspect >= 2.6 ? FOCI_WIDE : FOCI;
     gFociN = gAspect >= 2.6 ? 5 : 3;
+    const size_t n = gDots.size();
     buildWorld();
-    gDotBufA.resize(gDots.size() * 4);
-    gDotBufB.resize(gDots.size());
-    if (gSwap) {
-        rls(gDotASrv); rls(gDotA); rls(gDotBSrv); rls(gDotB);
-        createSwapChainResources();
-        buildStarTex(); buildGlowTex();
-        makeSB(gDev, (UINT)gDots.size(), 16, &gDotA, &gDotASrv);
-        makeSB(gDev, (UINT)gDots.size(), 4, &gDotB, &gDotBSrv);
-        gNeedsFrame = true;
+    if (gDots.size() != n || gDotBufA.empty()) {
+        gDotBufA.assign(gDots.size() * 4, 0.0f);
+        gDotBufB.assign(gDots.size(), 0);
     }
+}
+
+// (Re)create the view window under the current desktop host + its swapchain.
+// Retried on a timer — Explorer can tear down WorkerW at any moment.
+static bool embedView() {
+    releaseView();                           // drop stale swapchain objects first
+    if (!gInteractive) {
+        gHost = findDesktopHost();
+        if (!gHost) { logLine("embed: no host window yet"); return false; }
+    } else {
+        gHost = nullptr;                      // top-level popup, own metrics
+    }
+    measureHost();
+    if (gPhysW <= 0 || gPhysH <= 0) { logLine("embed: zero-size host"); return false; }
+    const int cw = gPhysW, ch = gPhysH;
+    if (gInteractive) {
+        gHwndView = CreateWindowExW(WS_EX_TOPMOST, L"HWView", L"Halftone Wallpaper",
+            WS_POPUP | WS_VISIBLE, gVsX, gVsY, cw, ch, nullptr, nullptr,
+            GetModuleHandleW(nullptr), nullptr);
+    } else {
+        gHwndView = CreateWindowExW(0, L"HWView", L"Halftone Wallpaper",
+            WS_CHILD | WS_VISIBLE, 0, 0, cw, ch, gHost, nullptr,
+            GetModuleHandleW(nullptr), nullptr);
+    }
+    if (!gHwndView) { logLine("embed: CreateWindowEx %lu", GetLastError()); return false; }
+    if (FAILED(initView(gHwndView))) {
+        DestroyWindow(gHwndView); gHwndView = nullptr;
+        return false;
+    }
+    logLine("embedded host=%p view=%p %dx%d", gHost, gHwndView, gPhysW, gPhysH);
+    gViewDead = false;
+    gNeedsFrame = true;
+    return true;
+}
+
+static void killView(const char* why) {
+    logLine("view teardown: %s", why);
+    releaseView();
+    if (gHwndView) { DestroyWindow(gHwndView); gHwndView = nullptr; }
+    gViewDead = true;
+    gDeadAt = GetTickCount64();
 }
 
 // ============================================================================
@@ -790,8 +894,38 @@ static HMENU makeMenu() {
 static HPOWERNOTIFY gPwrNotify = nullptr;
 static const GUID GUID_CONSOLE_DISPLAY_STATE_L =
     { 0x6fe69556, 0x704a, 0x47a0, { 0x8f, 0x24, 0xc2, 0x8d, 0x93, 0x6f, 0xda, 0x47 } };
+// View window: disposable swapchain host. Death ≠ quit — we just re-embed.
+static LRESULT CALLBACK viewProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_MOUSEMOVE:
+        if (gInteractive) {                  // real input stays live even with --no-pointer
+            const bool dn = (wp & MK_LBUTTON) != 0;
+            feedPointer(LOWORD(lp) / gDpr, HIWORD(lp) / gDpr, dn);
+        }
+        return 0;
+    case WM_ERASEBKGND: return 1;
+    case WM_KEYDOWN:
+        if (gInteractive && wp == VK_ESCAPE) gQuitting = true;
+        return 0;
+    case WM_DESTROY:
+        logLine("view WM_DESTROY (host teardown?)");
+        if (!gQuitting) {
+            gViewDead = true;
+            gDeadAt = GetTickCount64();
+        }
+        return 0;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
 
-static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+// Message window: persistent hidden top-level — owns the tray icon, power
+// notifications, and display-change broadcasts. Only this window can end the app.
+static LRESULT CALLBACK msgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == gTaskbarCreatedMsg) {         // Explorer restarted → re-add icon
+        logLine("TaskbarCreated -> re-add tray icon");
+        Shell_NotifyIconW(NIM_ADD, &gNid);
+        return 0;
+    }
     switch (msg) {
     case WM_TRAY:
         if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU) {
@@ -799,8 +933,9 @@ static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             HMENU m = makeMenu();
             SetForegroundWindow(h);
             const int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_NONOTIFY, p.x, p.y, 0, h, nullptr);
+            PostMessageW(h, WM_NULL, 0, 0);  // menu dismissal workaround
             DestroyMenu(m);
-            if (cmd == IDM_QUIT) PostQuitMessage(0);
+            if (cmd == IDM_QUIT) gQuitting = true;
             else if (cmd == IDM_STILL) { gStill = !gStill; recomputeFreeze(); }
         }
         return 0;
@@ -817,20 +952,13 @@ static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return TRUE;
     case WM_DISPLAYCHANGE:
-    case WM_DPICHANGED:
-        relayout();
+        logLine("WM_DISPLAYCHANGE -> re-embed");
+        killView("display change");
         return 0;
-    case WM_MOUSEMOVE:
-        if (gInteractive) {                  // real input stays live even with --no-pointer
-            const bool dn = (wp & MK_LBUTTON) != 0;
-            feedPointer(LOWORD(lp) / gDpr, HIWORD(lp) / gDpr, dn);
-        }
+    case WM_ENDSESSION:
+    case WM_DESTROY:
+        gQuitting = true;
         return 0;
-    case WM_ERASEBKGND: return 1;
-    case WM_KEYDOWN:
-        if (gInteractive && wp == VK_ESCAPE) PostQuitMessage(0);
-        return 0;
-    case WM_DESTROY: logLine("WM_DESTROY -> quit"); PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(h, msg, wp, lp);
 }
@@ -856,7 +984,6 @@ static void installAutostart(bool remove) {
     }
     RegCloseKey(k);
 }
-
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     SetUnhandledExceptionFilter(crashFilter);
@@ -869,10 +996,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int) {
     gInteractive = hasFlag(cmd, L"--interactive");
 
     HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\HalftoneWallpaper");
-    if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
+    if (GetLastError() == ERROR_ALREADY_EXISTS) { logLine("second instance -> exit"); return 0; }
     logLine("mutex ok");
 
-    // world metrics
+    // virtual-screen metrics for the interactive popup path
+    gVsX = GetSystemMetrics(SM_XVIRTUALSCREEN); gVsY = GetSystemMetrics(SM_YVIRTUALSCREEN);
     gDpr = GetDpiForSystem() / 96.0;
     gPhysW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
     gPhysH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
@@ -880,43 +1008,41 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int) {
     gFociSet = gAspect >= 2.6 ? FOCI_WIDE : FOCI;
     gFociN = gAspect >= 2.6 ? 5 : 3;
     buildWorld();
-    gDotBufA.resize(gDots.size() * 4);
-    gDotBufB.resize(gDots.size());
+    gDotBufA.assign(gDots.size() * 4, 0.0f);
+    gDotBufB.assign(gDots.size(), 0);
     logLine("world built dots=%zu stars=%zu W=%.0f H=%.0f dpr=%.2f phys=%dx%d",
         gDots.size(), gStars.size(), gW, gH, gDpr, gPhysW, gPhysH);
 
-    // window
-    WNDCLASSW wc = {};
-    wc.lpfnWndProc = wndProc;
-    wc.hInstance = inst;
-    wc.lpszClassName = L"HalftoneWallpaper";
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    RegisterClassW(&wc);
-    logLine("class registered");
+    // two classes: the disposable view (swapchain host) and the persistent
+    // message window (tray/power/display broadcasts).
+    WNDCLASSW wv = {};
+    wv.lpfnWndProc = viewProc;
+    wv.hInstance = inst;
+    wv.lpszClassName = L"HWView";
+    wv.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    RegisterClassW(&wv);
+    WNDCLASSW wm = {};
+    wm.lpfnWndProc = msgProc;
+    wm.hInstance = inst;
+    wm.lpszClassName = L"HWMsg";
+    RegisterClassW(&wm);
+    logLine("classes registered");
 
-    gVsX = GetSystemMetrics(SM_XVIRTUALSCREEN); gVsY = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    if (gInteractive) {
-        gHwnd = CreateWindowExW(WS_EX_TOPMOST, wc.lpszClassName, L"Halftone Wallpaper",
-            WS_POPUP | WS_VISIBLE, gVsX, gVsY, gPhysW, gPhysH,
-            nullptr, nullptr, inst, nullptr);
-    } else {
-        HWND host = findDesktopHost();
-        gHwnd = CreateWindowExW(0, wc.lpszClassName, L"Halftone Wallpaper",
-            WS_CHILD | WS_VISIBLE, gVsX, gVsY, gPhysW, gPhysH,
-            host, nullptr, inst, nullptr);
-    }
-    logLine("window created host=%s", gInteractive ? "topmost" : "workerw/progman");
-    if (!gHwnd) { MessageBoxW(nullptr, L"CreateWindow failed", L"HalftoneWallpaper", MB_ICONERROR); return 1; }
+    gHwndMsg = CreateWindowExW(0, L"HWMsg", L"Halftone Wallpaper Msg",
+        0, 0, 0, 0, 0, nullptr, nullptr, inst, nullptr);
+    if (!gHwndMsg) { logLine("msg window failed %lu", GetLastError()); return 1; }
+    gTaskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
 
-    if (FAILED(initD3D(gHwnd))) {
-        MessageBoxW(nullptr, L"Direct3D 11 init failed", L"HalftoneWallpaper", MB_ICONERROR);
+    if (FAILED(initDevice())) {
+        MessageBoxW(nullptr, L"Direct3D 11 init failed — see %TEMP%\\halftone-wallpaper.log",
+            L"HalftoneWallpaper", MB_ICONERROR);
         return 1;
     }
-    logLine("d3d init ok");
+    logLine("d3d device ok");
 
     // tray icon — the app's only chrome, like the macOS ◐ status item
     gNid.cbSize = sizeof gNid;
-    gNid.hWnd = gHwnd; gNid.uID = 1;
+    gNid.hWnd = gHwndMsg; gNid.uID = 1;
     gNid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     gNid.uCallbackMessage = WM_TRAY;
     gNid.hIcon = makeIcon();
@@ -927,19 +1053,22 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int) {
     // power watchers: battery freeze + display-off freeze (mac parity)
     SYSTEM_POWER_STATUS sps;
     if (GetSystemPowerStatus(&sps)) gOnAC = sps.ACLineStatus != 0;
-    gPwrNotify = RegisterPowerSettingNotification(gHwnd, &GUID_CONSOLE_DISPLAY_STATE_L,
+    gPwrNotify = RegisterPowerSettingNotification(gHwndMsg, &GUID_CONSOLE_DISPLAY_STATE_L,
         DEVICE_NOTIFY_WINDOW_HANDLE);
     recomputeFreeze();
     gT0 = GetTickCount64();
     logLine("power watch installed; entering loop frozen=%d", (int)gFrozen);
 
-    // pointer feed cadence ~30 Hz (matches the macOS NSEvent timer)
+    // pointer feed cadence ~30 Hz (matches the macOS NSEvent timer), with the
+    // mac's ≥1px movement coalescing so parked-then-twitch doesn't spike velocity.
     uint64_t lastFeed = 0;
+    POINT lastCp = { INT_MIN, INT_MIN };
 
-    // message loop: MsgWaitForMultipleObjectsEx sleeps until input or frame deadline —
-    // ~0% CPU while frozen, vsync-paced otherwise.
+    // message loop: MsgWaitForMultipleObjectsEx sleeps until input or frame
+    // deadline — ~0% CPU while frozen, vsync-paced otherwise.
     for (;;) {
-        const DWORD wait = gFrozen && !gNeedsFrame ? INFINITE : 16;
+        const DWORD wait = (gFrozen && !gNeedsFrame && !gViewDead) ? INFINITE
+            : gViewDead ? 200 : 16;
         MsgWaitForMultipleObjectsEx(0, nullptr, wait, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         MSG m;
         while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
@@ -947,15 +1076,26 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int) {
             TranslateMessage(&m);
             DispatchMessageW(&m);
         }
+        if (gQuitting) break;
+
+        // re-embed after WorkerW teardown (500ms backoff)
+        if (gViewDead && GetTickCount64() - gDeadAt >= 500 && embedView()) {
+            logLine("re-embed ok");
+        }
+
+        if (gViewDead) continue;             // no swapchain → idle until embed
+
         if (gFrozen) {
             if (gNeedsFrame) { renderFrame(); gNeedsFrame = false; }
-            continue;                        // sleep until input/power change
+            continue;
         }
         const uint64_t now = GetTickCount64();
         if (!gInteractive && !gNoPointer && now - lastFeed >= 33) {
             POINT cp;
-            if (GetCursorPos(&cp))
-                feedPointer((cp.x - gVsX) / gDpr, (cp.y - gVsY) / gDpr, false);
+            if (GetCursorPos(&cp) && (cp.x != lastCp.x || cp.y != lastCp.y)) {
+                feedPointer((cp.x - gHostX) / gDpr, (cp.y - gHostY) / gDpr, false);
+                lastCp = cp;
+            }
             lastFeed = now;
         }
         renderFrame();
@@ -964,6 +1104,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int) {
 done:
     Shell_NotifyIconW(NIM_DELETE, &gNid);
     if (gPwrNotify) UnregisterPowerSettingNotification(gPwrNotify);
+    releaseView();
+    if (gHwndView) DestroyWindow(gHwndView);
+    if (gHwndMsg) DestroyWindow(gHwndMsg);
     if (single) { ReleaseMutex(single); CloseHandle(single); }
+    logLine("exit clean");
     return 0;
 }
+

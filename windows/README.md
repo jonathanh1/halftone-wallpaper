@@ -39,7 +39,12 @@ Desktop icons, right-click menus and Alt-Tab are unaffected.
 - **Pointer warp without focus**: a ~30 Hz `GetCursorPos` feed drives the same
   impulse/spring math as the JS `__feed` (the window never sees the cursor).
 - **Ultrawide**: aspect ≥ 2.6 switches to the 5-lobe `FOCI_WIDE` set.
-- One ~900-line file, no dependencies beyond MSVC + the Windows SDK.
+- **Explorer restarts**: if Explorer tears down `WorkerW` (display change,
+  taskbar rebuild), the view window is destroyed and re-embedded within ~500 ms;
+  a persistent hidden message window keeps the tray icon + power/display
+  notifications across the swap. Device loss on `Present` exits the app (the
+  Run-key install restarts it on next login).
+- One ~1100-line file, no dependencies beyond MSVC + the Windows SDK.
   Shaders compile at startup; there is no network access, telemetry, or updater.
 
 ## How it works
@@ -56,10 +61,11 @@ HalftoneWallpaper.exe
 
 - **CPU per frame** (~5k dots, <1 ms): spring/impulse sim + `fieldAt()` per dot
   → packed dot buffers; `fieldAt()` on the glow grid → premultiplied texture.
-- **GPU per pixel**: star|glow base → 3×3 dot SDF `srcOver` → chromatic fringe +
-  bloom (additive) → grain multiply. Identical paint order to the Canvas path;
-  verified against the live `ripple.html` frame (mean |Δ| 3.4/255, diffs
-  confined to dot-edge anti-aliasing).
+- **GPU per pixel**: star|glow base → 7×7 dot SDF `srcOver` (a warped dot
+  displaces ±18 px ≈ 1.5 cells, plus ~10 px of halo reach — 3×3 loses it) →
+  chromatic fringe + bloom (additive) → grain multiply. Identical paint order
+  to the Canvas path; verified against the live `ripple.html` frame (mean |Δ|
+  3.31/255, lumCorr 0.977, diffs confined to dot-edge anti-aliasing).
 - Multi-monitor: one window spans the virtual screen. Mixed per-monitor DPI is
   treated as system DPI — **untested**.
 - Mixed refresh rates composite at the fastest display's cadence.
@@ -68,12 +74,15 @@ HalftoneWallpaper.exe
 
 Compiles and links clean — verified via `zig c++ -target x86_64-windows-gnu`
 (recipe at the top of `build.cmd`) producing `HalftoneWallpaper.exe`
-(PE32+ GUI x86-64). The render math was verified on macOS against the live
-`ripple.html` frame (mean |Δ| 3.3/255, diffs confined to dot-edge AA).
+(PE32+ GUI x86-64, ~420 KB). Both shaders compile clean under Microsoft's
+`dxc` (v1.9, run in a container) — `vs_5_0`/`ps_5_0`, no errors. The render
+math was verified on macOS against the live `ripple.html` frame (mean |Δ|
+3.31/255, lumCorr 0.977, diffs confined to dot-edge AA).
 
 **UNVERIFIED at runtime** — the exe has never been executed on real Windows
-hardware. D3DCompiler loads dynamically (`d3dcompiler_47.dll`, in-box since
-Windows 10), so there are no redistributable dependencies.
+hardware; the WorkerW embed, tray, power notifications, and swapchain path are
+compile-verified only. D3DCompiler loads dynamically (`d3dcompiler_47.dll`,
+in-box since Windows 10), so there are no redistributable dependencies.
 
 ## Not ported
 

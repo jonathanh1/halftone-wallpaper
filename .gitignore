@@ -2,3 +2,4 @@ HalftoneWallpaper.app/
 .DS_Store
 .derived/
 windows/HalftoneWallpaper.exe
+windows/*.pdb
