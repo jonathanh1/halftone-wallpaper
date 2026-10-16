@@ -26,8 +26,11 @@ build.cmd        →  HalftoneWallpaper.exe
 | No pointer glow | `HalftoneWallpaper.exe --no-pointer` |
 | Quit | tray icon → **Quit** |
 
-The window sits in `WorkerW` behind `SHELLDLL_DefView` — below the desktop
-icons, above the static wallpaper (same level as macOS `.desktopWindow`).
+The view window is created as a popup, then `SetParent`'d into the `WorkerW`
+layer that does **not** host `SHELLDLL_DefView` — below the desktop icons,
+above the static wallpaper (same level as macOS `.desktopWindow`), on both the
+Windows 10 (`DefView` under `Progman`) and Windows 11 (`DefView` under its own
+`WorkerW`) layouts. Fallback hosts: `Progman`, then the icon `WorkerW`.
 Desktop icons, right-click menus and Alt-Tab are unaffected.
 
 ## Behavior parity with the macOS app

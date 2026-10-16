@@ -757,7 +757,6 @@ static void renderFrame() {
 
 // Release everything tied to a specific swapchain/window so a view can be
 // re-embedded on a new host without leaking or double-binding.
-static HWND findDesktopHost();
 
 static void releaseView() {
     if (gCtx) gCtx->OMSetRenderTargets(0, nullptr, nullptr);
@@ -792,39 +791,6 @@ static void measureHost() {
     }
 }
 
-// (Re)create the view window under the current desktop host + its swapchain.
-// Retried on a timer — Explorer can tear down WorkerW at any moment.
-static bool embedView() {
-    releaseView();                           // drop stale swapchain objects first
-    if (!gInteractive) {
-        gHost = findDesktopHost();
-        if (!gHost) { logLine("embed: no host window yet"); return false; }
-    } else {
-        gHost = nullptr;                      // top-level popup, own metrics
-    }
-    measureHost();
-    if (gPhysW <= 0 || gPhysH <= 0) { logLine("embed: zero-size host"); return false; }
-    const int cw = gPhysW, ch = gPhysH;
-    if (gInteractive) {
-        gHwndView = CreateWindowExW(WS_EX_TOPMOST, L"HWView", L"Halftone Wallpaper",
-            WS_POPUP | WS_VISIBLE, gVsX, gVsY, cw, ch, nullptr, nullptr,
-            GetModuleHandleW(nullptr), nullptr);
-    } else {
-        gHwndView = CreateWindowExW(0, L"HWView", L"Halftone Wallpaper",
-            WS_CHILD | WS_VISIBLE, 0, 0, cw, ch, gHost, nullptr,
-            GetModuleHandleW(nullptr), nullptr);
-    }
-    if (!gHwndView) { logLine("embed: CreateWindowEx %lu", GetLastError()); return false; }
-    if (FAILED(initView(gHwndView))) {
-        DestroyWindow(gHwndView); gHwndView = nullptr;
-        return false;
-    }
-    logLine("embedded host=%p view=%p %dx%d", gHost, gHwndView, gPhysW, gPhysH);
-    gViewDead = false;
-    gNeedsFrame = true;
-    return true;
-}
-
 static void killView(const char* why) {
     logLine("view teardown: %s", why);
     releaseView();
@@ -834,24 +800,94 @@ static void killView(const char* why) {
 }
 
 // ============================================================================
-// Desktop embedding: the WorkerW trick (same family of technique Lively uses).
-// Message 0x052C makes Progman spawn a WorkerW *behind* SHELLDLL_DefView;
-// parenting our window there puts it under the icons, over the wallpaper.
+// Desktop embedding — the WorkerW trick (same family of technique Lively
+// uses). Message 0x052C makes Progman spawn a WorkerW *behind* the layer that
+// holds the icons. Win11 hosts desktop icons in a WorkerW (not Progman) on
+// newer builds, so pick the WorkerW that does NOT contain SHELLDLL_DefView —
+// that's always the wallpaper layer regardless of which layout shipped.
 // ============================================================================
-static HWND findDesktopHost() {
-    HWND progman = FindWindowW(L"Progman", nullptr);
-    if (!progman) return nullptr;
-    DWORD_PTR res = 0; (void)res;
-    SendMessageTimeoutW(progman, 0x052C, 0, 0, SMTO_NORMAL, 1000, &res);
-    HWND worker = nullptr;
+static void logClass(HWND h, const char* tag) {
+    wchar_t c[64] = {};
+    GetClassNameW(h, c, 64);
+    RECT r; GetWindowRect(h, &r);
+    logLine("%s hwnd=%p vis=%d rect=%ld,%ld-%ld,%ld class=%ls", tag, h,
+        (int)IsWindowVisible(h), r.left, r.top, r.right, r.bottom, c);
+}
+
+struct DesktopLayer { HWND wallpaper; HWND progman; HWND iconsWorker; };
+static DesktopLayer findDesktopLayers() {
+    DesktopLayer l = {};
+    l.progman = FindWindowW(L"Progman", nullptr);
+    if (l.progman) {
+        DWORD_PTR res = 0;
+        SendMessageTimeoutW(l.progman, 0x052C, 0, 0, SMTO_NORMAL, 1000, &res);
+    }
     EnumWindows([](HWND top, LPARAM lp) -> BOOL {
-        if (FindWindowExW(top, nullptr, L"SHELLDLL_DefView", nullptr)) {
-            *reinterpret_cast<HWND*>(lp) = FindWindowExW(nullptr, top, L"WorkerW", nullptr);
-            return FALSE;
-        }
+        auto* l = reinterpret_cast<DesktopLayer*>(lp);
+        wchar_t c[16] = {};
+        GetClassNameW(top, c, 16);
+        const bool isWorker = wcscmp(c, L"WorkerW") == 0;
+        const bool hasIcons = FindWindowExW(top, nullptr, L"SHELLDLL_DefView", nullptr) != nullptr;
+        if (isWorker && !hasIcons && !l->wallpaper) l->wallpaper = top;
+        if (isWorker && hasIcons && !l->iconsWorker) l->iconsWorker = top;
         return TRUE;
-    }, reinterpret_cast<LPARAM>(&worker));
-    return worker ? worker : progman;      // fallback: Progman itself
+    }, reinterpret_cast<LPARAM>(&l));
+    logClass(l.progman, "host:progman");
+    logClass(l.wallpaper, "host:wallpaperWW");
+    logClass(l.iconsWorker, "host:iconsWW");
+    return l;
+}
+
+// Candidate hosts, best first. Returns true when a view window is created and
+// its swapchain initialized under that host; the caller retries later on false.
+static bool tryEmbedOn(HWND host, const char* tag) {
+    if (!host) return false;
+    gHost = host;
+    measureHost();
+    if (gPhysW <= 0 || gPhysH <= 0) { logLine("embed[%s]: zero-size host", tag); return false; }
+    gHwndView = CreateWindowExW(WS_EX_NOACTIVATE, L"HWView", L"Halftone Wallpaper",
+        WS_POPUP, 0, 0, gPhysW, gPhysH, nullptr, nullptr,
+        GetModuleHandleW(nullptr), nullptr);
+    if (!gHwndView) { logLine("embed[%s]: CreateWindowEx %lu", tag, GetLastError()); return false; }
+    // Lively recipe: create as popup, then adopt into the host at bottom.
+    if (!SetParent(gHwndView, host)) { logLine("embed[%s]: SetParent %lu", tag, GetLastError()); goto fail; }
+    SetWindowLongPtrW(gHwndView, GWL_STYLE,
+        (GetWindowLongPtrW(gHwndView, GWL_STYLE) & ~WS_POPUP) | WS_CHILD);
+    SetWindowPos(gHwndView, HWND_BOTTOM, 0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED);
+    if (FAILED(initView(gHwndView))) goto fail;
+    logLine("embedded [%s] host=%p view=%p %dx%d", tag, gHost, gHwndView, gPhysW, gPhysH);
+    gViewDead = false;
+    gNeedsFrame = true;
+    return true;
+fail:
+    DestroyWindow(gHwndView); gHwndView = nullptr; gHost = nullptr;
+    return false;
+}
+
+static bool embedView() {
+    releaseView();                           // drop stale swapchain objects first
+    if (gInteractive) {
+        gHost = nullptr;                      // top-level popup, own metrics
+        measureHost();
+        gHwndView = CreateWindowExW(WS_EX_TOPMOST, L"HWView", L"Halftone Wallpaper",
+            WS_POPUP | WS_VISIBLE, gVsX, gVsY, gPhysW, gPhysH, nullptr, nullptr,
+            GetModuleHandleW(nullptr), nullptr);
+        if (!gHwndView) { logLine("embed interactive: CreateWindowEx %lu", GetLastError()); return false; }
+        if (FAILED(initView(gHwndView))) {
+            DestroyWindow(gHwndView); gHwndView = nullptr;
+            return false;
+        }
+        gViewDead = false; gNeedsFrame = true;
+        return true;
+    }
+    const DesktopLayer l = findDesktopLayers();
+    // wallpaper WorkerW → Progman → icon-layer WorkerW (last resort, below icons)
+    if (tryEmbedOn(l.wallpaper, "wallpaperWW")) return true;
+    if (tryEmbedOn(l.progman, "progman")) return true;
+    if (tryEmbedOn(l.iconsWorker, "iconsWW")) return true;
+    logLine("embed: no usable host (all candidates failed)");
+    return false;
 }
 
 // ============================================================================
