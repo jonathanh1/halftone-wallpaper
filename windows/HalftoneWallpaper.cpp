@@ -705,6 +705,8 @@ static void recomputeFreeze() {
     if (gFrozen) parkPointer();
 }
 
+static void logFramePixels();   // defined after measureHost
+
 static void renderFrame() {
     const double t = curT();
     static double last = 0;
@@ -753,6 +755,12 @@ static void renderFrame() {
         logLine("Present device lost %08lx -> quit", phr);
         gQuitting = true;
     }
+    static int frameNo = 0;
+    if ((++frameNo % 60) == 0 || frameNo == 2) {
+        logLine("frame %d present=%08lx view=%p vis=%d", frameNo, phr,
+            gHwndView, gHwndView ? (int)IsWindowVisible(gHwndView) : -1);
+        logFramePixels();
+    }
 }
 
 // Release everything tied to a specific swapchain/window so a view can be
@@ -790,6 +798,38 @@ static void measureHost() {
         gDotBufB.assign(gDots.size(), 0);
     }
 }
+// Readback diagnostic: samples 3 backbuffer pixels after Present so the log
+// proves what the GPU actually drew vs what the compositor shows. Beta-only.
+static void logFramePixels() {
+    if (!gSwap) return;
+    ID3D11Texture2D* bb = nullptr;
+    if (FAILED(gSwap->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb))) return;
+    D3D11_TEXTURE2D_DESC bd;
+    bb->GetDesc(&bd);
+    ID3D11Texture2D* st = nullptr;
+    bd.Usage = D3D11_USAGE_STAGING;
+    bd.BindFlags = 0;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    bd.MiscFlags = 0;
+    if (FAILED(gDev->CreateTexture2D(&bd, nullptr, &st))) { bb->Release(); return; }
+    gCtx->CopyResource(st, bb);
+    bb->Release();
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (FAILED(gCtx->Map(st, 0, D3D11_MAP_READ, 0, &m))) { st->Release(); return; }
+    const uint8_t* px = (const uint8_t*)m.pData;
+    const UINT pitch = m.RowPitch;
+    const int W = (int)bd.Width, H = (int)bd.Height;
+    uint32_t c[3] = {};
+    for (int s = 0; s < 3; s++) {
+        const int x = W * (s + 1) / 4, y = H * (s + 1) / 4;
+        const uint8_t* p = px + (size_t)y * pitch + x * 4;
+        c[s] = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16);
+    }
+    gCtx->Unmap(st, 0);
+    st->Release();
+    logLine("frame px @%dx%d: #%06x #%06x #%06x", W, H, c[0], c[1], c[2]);
+}
+
 
 static void killView(const char* why) {
     logLine("view teardown: %s", why);
@@ -1035,11 +1075,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int) {
     SetUnhandledExceptionFilter(crashFilter);
     logLine("=== start ===");
 
+    cmd = (PWSTR)GetCommandLineW();   // wWinMain's cmd param is unreliable
     if (hasFlag(cmd, L"--uninstall")) { installAutostart(true); return 0; }
     if (hasFlag(cmd, L"--install")) installAutostart(false);
     gStill = hasFlag(cmd, L"--still");
     gNoPointer = hasFlag(cmd, L"--no-pointer");
     gInteractive = hasFlag(cmd, L"--interactive");
+    logLine("flags: still=%d noPointer=%d interactive=%d", (int)gStill,
+        (int)gNoPointer, (int)gInteractive);
 
     HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\HalftoneWallpaper");
     if (GetLastError() == ERROR_ALREADY_EXISTS) { logLine("second instance -> exit"); return 0; }

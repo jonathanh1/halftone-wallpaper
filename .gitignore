@@ -5,3 +5,4 @@ windows/HalftoneWallpaper.exe
 windows/*.pdb
 renders/
 HalftoneSaver.saver/
+windows/app.res
