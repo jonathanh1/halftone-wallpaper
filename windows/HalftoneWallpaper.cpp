@@ -35,6 +35,7 @@
 #include <cstdio>
 #include <cwchar>
 #include <cstring>
+#include <cstdarg>
 #include <vector>
 #include <algorithm>
 
@@ -51,6 +52,31 @@ using std::max;
 #ifndef _countof
 #define _countof(a) (sizeof(a) / sizeof(*(a)))
 #endif
+
+// --- beta diagnostics: milestone log + crash filter -----------------------
+// Writes %TEMP%\halftone-wallpaper.log. Temporary — remove after hardware test.
+static void logLine(const char* fmt, ...) {
+    wchar_t tp[MAX_PATH];
+    if (!GetTempPathW(MAX_PATH, tp)) return;
+    wchar_t path[MAX_PATH];
+    swprintf_s(path, _countof(path), L"%shalftone-wallpaper.log", tp);
+    FILE* f = _wfopen(path, L"a");
+    if (!f) return;
+    va_list ap; va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    fputc('\n', f);
+    va_end(ap); fclose(f);
+}
+static LONG WINAPI crashFilter(EXCEPTION_POINTERS* ep) {
+    const DWORD code = ep && ep->ExceptionRecord ? ep->ExceptionRecord->ExceptionCode : 0;
+    const void* addr = ep && ep->ExceptionRecord ? ep->ExceptionRecord->ExceptionAddress : nullptr;
+    logLine("CRASH code=%08lx addr=%p", code, addr);
+    char buf[256];
+    snprintf(buf, sizeof buf, "HalftoneWallpaper crashed: code %08lX at %p\n"
+        "Log: %%TEMP%%\\halftone-wallpaper.log", code, addr);
+    MessageBoxA(nullptr, buf, "HalftoneWallpaper", MB_ICONERROR);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
 
 // ============================================================================
 // Field — line-for-line port of parts/_field_extract.js (double precision so
@@ -804,7 +830,7 @@ static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_KEYDOWN:
         if (gInteractive && wp == VK_ESCAPE) PostQuitMessage(0);
         return 0;
-    case WM_DESTROY: PostQuitMessage(0); return 0;
+    case WM_DESTROY: logLine("WM_DESTROY -> quit"); PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(h, msg, wp, lp);
 }
@@ -833,6 +859,8 @@ static void installAutostart(bool remove) {
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    SetUnhandledExceptionFilter(crashFilter);
+    logLine("=== start ===");
 
     if (hasFlag(cmd, L"--uninstall")) { installAutostart(true); return 0; }
     if (hasFlag(cmd, L"--install")) installAutostart(false);
@@ -842,6 +870,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int) {
 
     HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\HalftoneWallpaper");
     if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
+    logLine("mutex ok");
 
     // world metrics
     gDpr = GetDpiForSystem() / 96.0;
@@ -853,6 +882,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int) {
     buildWorld();
     gDotBufA.resize(gDots.size() * 4);
     gDotBufB.resize(gDots.size());
+    logLine("world built dots=%zu stars=%zu W=%.0f H=%.0f dpr=%.2f phys=%dx%d",
+        gDots.size(), gStars.size(), gW, gH, gDpr, gPhysW, gPhysH);
 
     // window
     WNDCLASSW wc = {};
@@ -861,6 +892,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int) {
     wc.lpszClassName = L"HalftoneWallpaper";
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     RegisterClassW(&wc);
+    logLine("class registered");
 
     gVsX = GetSystemMetrics(SM_XVIRTUALSCREEN); gVsY = GetSystemMetrics(SM_YVIRTUALSCREEN);
     if (gInteractive) {
@@ -873,12 +905,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int) {
             WS_CHILD | WS_VISIBLE, gVsX, gVsY, gPhysW, gPhysH,
             host, nullptr, inst, nullptr);
     }
+    logLine("window created host=%s", gInteractive ? "topmost" : "workerw/progman");
     if (!gHwnd) { MessageBoxW(nullptr, L"CreateWindow failed", L"HalftoneWallpaper", MB_ICONERROR); return 1; }
 
     if (FAILED(initD3D(gHwnd))) {
         MessageBoxW(nullptr, L"Direct3D 11 init failed", L"HalftoneWallpaper", MB_ICONERROR);
         return 1;
     }
+    logLine("d3d init ok");
 
     // tray icon — the app's only chrome, like the macOS ◐ status item
     gNid.cbSize = sizeof gNid;
@@ -888,6 +922,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int) {
     gNid.hIcon = makeIcon();
     wcscpy_s(gNid.szTip, L"Halftone Wallpaper");
     Shell_NotifyIconW(NIM_ADD, &gNid);
+    logLine("tray icon added");
 
     // power watchers: battery freeze + display-off freeze (mac parity)
     SYSTEM_POWER_STATUS sps;
@@ -896,6 +931,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int) {
         DEVICE_NOTIFY_WINDOW_HANDLE);
     recomputeFreeze();
     gT0 = GetTickCount64();
+    logLine("power watch installed; entering loop frozen=%d", (int)gFrozen);
 
     // pointer feed cadence ~30 Hz (matches the macOS NSEvent timer)
     uint64_t lastFeed = 0;
