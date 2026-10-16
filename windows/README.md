@@ -1,0 +1,78 @@
+# Halftone Wallpaper — Windows 11
+
+Native port of the halftone-aurora wallpaper. Same field as
+`Resources/ripple.html`, rendered on the GPU with **Direct3D 11** instead of
+Canvas 2D — one fullscreen triangle, everything else is texture/buffer uploads.
+
+## Build
+
+Requires **Visual Studio 2022** (Community is fine) with the
+*Desktop development with C++* workload, and the Windows 10/11 SDK.
+
+```bat
+cd windows
+build.cmd        →  HalftoneWallpaper.exe
+```
+
+## Run
+
+| Action | Command |
+|---|---|
+| Live wallpaper | `HalftoneWallpaper.exe` |
+| Autostart at login | `HalftoneWallpaper.exe --install` |
+| Remove autostart | `HalftoneWallpaper.exe --uninstall` |
+| Frozen frame (~0 GPU/CPU) | `HalftoneWallpaper.exe --still` or tray → *Freeze field* |
+| Draggable field (covers icons) | `HalftoneWallpaper.exe --interactive` (Esc quits) |
+| No pointer glow | `HalftoneWallpaper.exe --no-pointer` |
+| Quit | tray icon → **Quit** |
+
+The window sits in `WorkerW` behind `SHELLDLL_DefView` — below the desktop
+icons, above the static wallpaper (same level as macOS `.desktopWindow`).
+Desktop icons, right-click menus and Alt-Tab are unaffected.
+
+## Behavior parity with the macOS app
+
+- **Battery-aware**: unplugging AC freezes the field (`PBT_APMPOWERSTATUSCHANGE`
+  + `GetSystemPowerStatus`); replugging resumes.
+- **Display-off**: freezes while the console display is off
+  (`GUID_CONSOLE_DISPLAY_STATE`), resumes on wake.
+- **Pointer warp without focus**: a ~30 Hz `GetCursorPos` feed drives the same
+  impulse/spring math as the JS `__feed` (the window never sees the cursor).
+- **Ultrawide**: aspect ≥ 2.6 switches to the 5-lobe `FOCI_WIDE` set.
+- One ~900-line file, no dependencies beyond MSVC + the Windows SDK.
+  Shaders compile at startup; there is no network access, telemetry, or updater.
+
+## How it works
+
+```
+HalftoneWallpaper.exe
+└── WS_CHILD window on WorkerW  (behind SHELLDLL_DefView → under icons)
+    └── D3D11 swapchain, flip model
+        └── 1 fullscreen triangle
+            PS ← starTex (baked R16F layer) + glowTex (14px-cell field grid)
+               + grainTex (exact JS 128² tile)
+               + dotA/dotB StructuredBuffers (per-dot pos/r/color/flags)
+```
+
+- **CPU per frame** (~5k dots, <1 ms): spring/impulse sim + `fieldAt()` per dot
+  → packed dot buffers; `fieldAt()` on the glow grid → premultiplied texture.
+- **GPU per pixel**: star|glow base → 3×3 dot SDF `srcOver` → chromatic fringe +
+  bloom (additive) → grain multiply. Identical paint order to the Canvas path;
+  verified against the live `ripple.html` frame (mean |Δ| 3.4/255, diffs
+  confined to dot-edge anti-aliasing).
+- Multi-monitor: one window spans the virtual screen. Mixed per-monitor DPI is
+  treated as system DPI — **untested**.
+- Mixed refresh rates composite at the fastest display's cadence.
+
+## Status
+
+**UNVERIFIED on real Windows hardware** — written and math-verified on macOS
+against the production `ripple.html` frame; the Win32/D3D glue has not been
+compiled or run. First build on a Windows box may surface compile nits; report
+them and they're quick fixes.
+
+## Not ported
+
+- `HalftoneSaver.saver` equivalent (.scr screensaver) — the WorkerW window is
+  the wallpaper; Windows screensavers are a separate mechanism. Open follow-up.
+- Per-monitor independent DPI (one window spans the virtual screen instead).

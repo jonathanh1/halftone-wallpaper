@@ -15,6 +15,15 @@ your cursor over it and the dots warp, glow, and spring back.
 - **No network, no telemetry, no account.** One ~180-line Swift file + one standalone HTML file.
 - **Two flavors:** `HalftoneWallpaper.app` (always-desktop-level) or `HalftoneSaver.saver` (OS-native screen saver — on macOS Sonoma+ System Settings can also show it as wallpaper)
 
+### Windows 11
+
+A Direct3D 11 port lives in [`windows/`](windows/): the same field re-hosted on
+one fullscreen-triangle pixel shader (no WebView), embedded in `WorkerW` below
+the desktop icons, with the same battery/display-off freeze behavior. Build it
+with `windows\build.cmd` (MSVC + Windows SDK). Status: math-verified against
+`ripple.html`, **unverified on real Windows hardware** — see
+[`windows/README.md`](windows/README.md).
+
 ## Install
 
 ### Option A — prebuilt app (easiest)
