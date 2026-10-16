@@ -29,6 +29,7 @@
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <d3dcompiler.h>
+#include <shlobj.h>
 #include <dxgi.h>
 #include <shellapi.h>
 #include <cmath>
@@ -56,12 +57,21 @@ using std::max;
 #endif
 
 // --- beta diagnostics: milestone log + crash filter -----------------------
-// Writes %TEMP%\halftone-wallpaper.log. Temporary — remove after hardware test.
+// Writes %USERPROFILE%\Desktop\halftone-wallpaper.log (falls back to %TEMP%
+// when the Desktop folder can't be resolved). Temporary — remove after
+// hardware test.
 static void logLine(const char* fmt, ...) {
-    wchar_t tp[MAX_PATH];
-    if (!GetTempPathW(MAX_PATH, tp)) return;
     wchar_t path[MAX_PATH];
-    swprintf_s(path, _countof(path), L"%shalftone-wallpaper.log", tp);
+    HRESULT h = SHGetFolderPathW(nullptr, CSIDL_DESKTOPDIRECTORY, nullptr,
+        SHGFP_TYPE_CURRENT, path);
+    size_t len = FAILED(h) ? 0 : wcslen(path);
+    if (len && path[len - 1] == L'\\') path[--len] = 0;
+    if (FAILED(h) || !len ||
+        swprintf_s(path + len, _countof(path) - len,
+            L"\\halftone-wallpaper.log") < 0) {
+        if (!GetTempPathW(MAX_PATH, path)) return;
+        wcscat_s(path, _countof(path), L"halftone-wallpaper.log");
+    }
     FILE* f = _wfopen(path, L"a");
     if (!f) return;
     va_list ap; va_start(ap, fmt);
@@ -75,7 +85,7 @@ static LONG WINAPI crashFilter(EXCEPTION_POINTERS* ep) {
     logLine("CRASH code=%08lx addr=%p", code, addr);
     char buf[256];
     snprintf(buf, sizeof buf, "HalftoneWallpaper crashed: code %08lX at %p\n"
-        "Log: %%TEMP%%\\halftone-wallpaper.log", code, addr);
+        "Log: Desktop\\halftone-wallpaper.log (or %%TEMP%%\\halftone-wallpaper.log)", code, addr);
     MessageBoxA(nullptr, buf, "HalftoneWallpaper", MB_ICONERROR);
     return EXCEPTION_EXECUTE_HANDLER;
 }
@@ -1034,7 +1044,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int) {
     gTaskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
 
     if (FAILED(initDevice())) {
-        MessageBoxW(nullptr, L"Direct3D 11 init failed — see %TEMP%\\halftone-wallpaper.log",
+        MessageBoxW(nullptr, L"Direct3D 11 init failed — see Desktop\\halftone-wallpaper.log",
             L"HalftoneWallpaper", MB_ICONERROR);
         return 1;
     }
@@ -1079,11 +1089,23 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int) {
         if (gQuitting) break;
 
         // re-embed after WorkerW teardown (500ms backoff)
+        static uint64_t deadSince = 0;
+        static bool embedWarned = false;
         if (gViewDead && GetTickCount64() - gDeadAt >= 500 && embedView()) {
             logLine("re-embed ok");
+            deadSince = 0;
         }
-
-        if (gViewDead) continue;             // no swapchain → idle until embed
+        if (gViewDead) {
+            if (!deadSince) deadSince = GetTickCount64();
+            if (!embedWarned && GetTickCount64() - deadSince > 10000) {
+                embedWarned = true;
+                MessageBoxW(nullptr,
+                    L"Wallpaper can't embed into the desktop — see "
+                    L"Desktop\\halftone-wallpaper.log",
+                    L"HalftoneWallpaper", MB_ICONWARNING);
+            }
+            continue;                        // no swapchain → idle until embed
+        }
 
         if (gFrozen) {
             if (gNeedsFrame) { renderFrame(); gNeedsFrame = false; }

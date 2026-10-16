@@ -84,6 +84,20 @@ hardware; the WorkerW embed, tray, power notifications, and swapchain path are
 compile-verified only. D3DCompiler loads dynamically (`d3dcompiler_47.dll`,
 in-box since Windows 10), so there are no redistributable dependencies.
 
+## Troubleshooting
+
+Run the exe, then check **`Desktop\halftone-wallpaper.log`** (falls back to
+`%TEMP%\` if the Desktop path can't be resolved). One line per milestone:
+
+| Log ends at | Meaning |
+|---|---|
+| No file at all | Exe never started — SmartScreen/AV blocked it; right-click the exe → **Properties → Unblock**, or click *More info → Run anyway* |
+| …`power watch installed` but no `embedded` | WorkerW embed is failing; the `embed:` lines name the failing call |
+| `embedded …` present, still invisible | Rendering but wrong host/occluded — report the log |
+| `CRASH code=…` | Hard crash with the faulting address logged |
+
+If the embed keeps failing for ~10 s a message box appears pointing at the log.
+
 ## Not ported
 
 - `HalftoneSaver.saver` equivalent (.scr screensaver) — the WorkerW window is
