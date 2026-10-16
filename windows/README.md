@@ -66,10 +66,14 @@ HalftoneWallpaper.exe
 
 ## Status
 
-**UNVERIFIED on real Windows hardware** — written and math-verified on macOS
-against the production `ripple.html` frame; the Win32/D3D glue has not been
-compiled or run. First build on a Windows box may surface compile nits; report
-them and they're quick fixes.
+Compiles and links clean — verified via `zig c++ -target x86_64-windows-gnu`
+(recipe at the top of `build.cmd`) producing `HalftoneWallpaper.exe`
+(PE32+ GUI x86-64). The render math was verified on macOS against the live
+`ripple.html` frame (mean |Δ| 3.3/255, diffs confined to dot-edge AA).
+
+**UNVERIFIED at runtime** — the exe has never been executed on real Windows
+hardware. D3DCompiler loads dynamically (`d3dcompiler_47.dll`, in-box since
+Windows 10), so there are no redistributable dependencies.
 
 ## Not ported
 

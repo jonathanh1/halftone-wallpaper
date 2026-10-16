@@ -21,7 +21,9 @@
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
+#ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0A00
+#endif
 #include <windows.h>
 #include <pbt.h>
 #include <d3d11.h>
@@ -32,6 +34,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cwchar>
+#include <cstring>
 #include <vector>
 #include <algorithm>
 
@@ -40,11 +43,14 @@ using std::max;
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
-#pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
+
+#ifndef _countof
+#define _countof(a) (sizeof(a) / sizeof(*(a)))
+#endif
 
 // ============================================================================
 // Field — line-for-line port of parts/_field_extract.js (double precision so
@@ -389,10 +395,29 @@ static ID3D11ShaderResourceView* gGrainSrv = nullptr;
 static int gGlowW = 0, gGlowH = 0, gGlowY0 = 0;
 
 template<typename T> static inline void rls(T*& p) { if (p) { p->Release(); p = nullptr; } }
+// d3dcompiler_47.dll ships in-box on Windows 10/11 — load it dynamically so the
+// exe has no D3DCompiler import-lib/redist dependency (and cross-links cleanly).
+static pD3DCompile gD3DCompileFn = nullptr;
+static bool loadD3DCompiler() {
+    static HMODULE mod = nullptr;
+    if (gD3DCompileFn) return true;
+    if (!mod) {
+        mod = LoadLibraryW(L"d3dcompiler_47.dll");
+        if (!mod) mod = LoadLibraryW(L"d3dcompiler_43.dll");
+        if (!mod) return false;
+    }
+    gD3DCompileFn = (pD3DCompile)GetProcAddress(mod, "D3DCompile");
+    return gD3DCompileFn != nullptr;
+}
+
 
 static HRESULT compileShader(const char* src, const char* entry, const char* target, ID3DBlob** out) {
     ID3DBlob* err = nullptr;
-    HRESULT hr = D3DCompile(src, strlen(src), nullptr, nullptr, nullptr, entry, target,
+    if (!loadD3DCompiler()) {
+        MessageBoxA(nullptr, "d3dcompiler_47.dll not found", "HalftoneWallpaper", MB_ICONERROR);
+        return E_FAIL;
+    }
+    HRESULT hr = gD3DCompileFn(src, strlen(src), nullptr, nullptr, nullptr, entry, target,
         D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, out, &err);
     if (FAILED(hr)) {
         const char* msg = err ? (const char*)err->GetBufferPointer() : "unknown";
@@ -555,6 +580,8 @@ static HRESULT initD3D(HWND hwnd) {
     return buildGrainTex();
 }
 
+static std::vector<uint8_t> gGlowPx;
+
 // Per-frame glow texture (premultiplied bytes, like drawGlow's ImageData).
 static void updateGlowTex(double t, const std::vector<Foci>& foci) {
     gGlowPx.assign((size_t)gGlowW * gGlowH * 4, 0);
@@ -582,7 +609,6 @@ static bool gOnAC = true, gDisplayOn = true;
 static uint64_t gT0 = 0;                  // ms epoch for t
 static std::vector<float> gDotBufA;
 static std::vector<uint32_t> gDotBufB;
-static std::vector<uint8_t> gGlowPx;
 static std::vector<Foci> gFoci;
 static const FocusDef* gFociSet = FOCI;
 static size_t gFociN = 3;

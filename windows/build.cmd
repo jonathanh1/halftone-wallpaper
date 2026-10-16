@@ -1,6 +1,9 @@
 @echo off
 rem HalftoneWallpaper for Windows 11 — one-file build.
 rem Needs MSVC (Visual Studio 2022 Build Tools or Community) + Windows SDK.
+rem Cross-compile also works: zig c++ -target x86_64-windows-gnu -std=c++17 -O2
+rem   -municode -Wl,--subsystem,windows HalftoneWallpaper.cpp -o HalftoneWallpaper.exe
+rem   -ld3d11 -ldxgi -luser32 -lgdi32 -lshell32 -lole32
 setlocal
 set "SRC=%~dp0HalftoneWallpaper.cpp"
 set "OUT=%~dp0HalftoneWallpaper.exe"
@@ -23,7 +26,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-cl /nologo /O2 /EHsc /W3 /DUNICODE /D_UNICODE "%SRC%" /Fe:"%OUT%"
+cl /nologo /O2 /EHsc /W3 /DUNICODE /D_UNICODE "%SRC%" /Fe:"%OUT%" /link /SUBSYSTEM:WINDOWS
 if errorlevel 1 exit /b 1
 echo Built %OUT%
 echo Run once:            "%OUT%"
