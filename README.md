@@ -109,24 +109,12 @@ The field lives in `Resources/ripple.html` — tweak colors, dot spacing
 `parts/` directory holds the source pieces the HTML was assembled from
 (`_head.html` + `_field_extract.js` + `_driver.js`) for easier editing.
 
-## Mockups and renders
-
-`mockups/` holds the full-screen interactive studies this project was built
-from — the switcher (`halftone-aurora.html`), standalone variants (Ripple,
-Force, Drift, Cascade, Corona), a single-frame wallpaper page, and the skin
-study that fed the Halftone Veil application skin in
-[ohmygui](https://github.com/jonathanh1/ohmygui). Open `mockups/index.html`
-for the hub. They share `_halftone.js` / `_halftone.css` and a vendored copy
-of ohmygui's `_kit-skin.css` so they render standalone; `Resources/ripple.html`
-is the production extract, not these pages. `renders/` holds the captured
-PNG frames (wallpapers, lockscreen exports, A/B comparisons).
-
 ## Cost & compatibility
 
 - Tested on macOS 15 (Apple Silicon, Retina 3456×2234). `LSMinimumSystemVersion` 13.0.
 - Ultrawide ready: at aspect ≥ 2.6 (32:9 / 32:10, e.g. a 5120×1440 Odyssey) the
   field switches to a 5-lobe foci set so the aurora stays one continuous band
-  instead of three detached hills. Verified by 5120×1440 render captures.
+  instead of three detached hills.
 - Ad-hoc signed only — Gatekeeper will ask for right-click → Open once.
 - Untested: multi-display layouts (code paths exist), `--interactive` long-term,
   Gatekeeper on managed/MDM machines.

@@ -3,3 +3,5 @@ HalftoneWallpaper.app/
 .derived/
 windows/HalftoneWallpaper.exe
 windows/*.pdb
+renders/
+HalftoneSaver.saver/
